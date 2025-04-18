@@ -12,8 +12,8 @@ import matplotlib.pyplot as plt
 
 
 # Load the image or mask (assuming it's a binary mask)
-original_image = cv2.imread('/Volumes/Finkbeiner-Steve/work/data/Hevolution/Austin-Fibroblasts/AG08498A-P14_T25_10X_0000_TRANS.jpg', cv2.IMREAD_UNCHANGED)
-mask = cv2.imread('/Volumes/Finkbeiner-Steve/work/data/Hevolution/Austin-Fibroblasts/AG08498A-P14_T25_10X_0000_TRANS_cp_masks.png', cv2.IMREAD_UNCHANGED)
+original_image = cv2.imread('/home/vgramas/Desktop/steve/work/data/Hevolution/Austin-Fibroblasts/AG08498A-P14_T25_10X_0000_TRANS.jpg', cv2.IMREAD_UNCHANGED)
+mask = cv2.imread('/home/vgramas/Desktop/steve/work/data/Hevolution/Austin-Fibroblasts/AG08498A-P14_T25_10X_0000_TRANS_cp_masks.png', cv2.IMREAD_UNCHANGED)
 # Convert the mask to binary: any non-zero value is considered part of the cell
 binary_mask = np.where(mask > 0, 1, 0)
 

@@ -1,0 +1,2 @@
+# detect_fibroblast
+python detect_fibroblast.py /home/vgramas/Desktop/steve/work/data/Hevolution/Austin-Fibroblasts --diameter 30 --model cyto --save_dir /home/vgramas/Desktop/steve/work/data/Hevolution/Austin-Fibroblasts/masks
