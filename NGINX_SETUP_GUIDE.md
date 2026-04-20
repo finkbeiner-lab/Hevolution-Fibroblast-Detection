@@ -114,7 +114,7 @@ curl http://localhost       # Should also work (via nginx)
 ```
 
 **From your browser:**
-- `http://3.150.215.121` (should work now!)
+- `http://YOUR_EC2_IP` (should work now!)
 
 ## 🔒 Optional: Set Up HTTPS (Port 443)
 
@@ -155,7 +155,7 @@ I've created a script that does all of this:
 
 ```bash
 # Copy to EC2
-scp setup_nginx_reverse_proxy.sh ubuntu@3.150.215.121:~/
+scp setup_nginx_reverse_proxy.sh ubuntu@YOUR_EC2_IP:~/
 
 # On EC2, run it
 chmod +x ~/setup_nginx_reverse_proxy.sh

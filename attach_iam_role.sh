@@ -9,7 +9,7 @@ echo ""
 echo "STEP 1: Attach IAM Role via AWS Console"
 echo "----------------------------------------"
 echo "1. Go to: AWS Console → EC2 → Instances"
-echo "2. Select your instance (IP: 3.150.215.121)"
+echo "2. Select your instance (IP: YOUR_EC2_IP)"
 echo "3. Actions → Security → Modify IAM role"
 echo "4. Select: SageMakerFibroblastRole"
 echo "5. Click: Update IAM role"
@@ -59,7 +59,7 @@ if [ -n "$ROLE" ] && [ "$ROLE" != "404 - Not Found" ]; then
         echo ""
         
         echo "Testing S3 access..."
-        if aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2 2>/dev/null; then
+        if aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2 2>/dev/null; then
             echo "✅ S3 access working!"
             echo ""
             

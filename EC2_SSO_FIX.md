@@ -40,15 +40,15 @@ aws sso login --profile your-profile
 
 ```bash
 # From your local machine
-scp ~/.aws/credentials ubuntu@3.150.215.121:~/.aws/
-scp ~/.aws/config ubuntu@3.150.215.121:~/.aws/
+scp ~/.aws/credentials ubuntu@YOUR_EC2_IP:~/.aws/
+scp ~/.aws/config ubuntu@YOUR_EC2_IP:~/.aws/
 ```
 
 **Step 3: On EC2, test:**
 
 ```bash
 aws sts get-caller-identity
-aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2
+aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2
 ```
 
 **⚠️ Note:** SSO credentials expire after a few hours, so you'll need to repeat this.
@@ -97,7 +97,7 @@ aws sts get-caller-identity
 # Should show the IAM role ARN, not your user
 
 # Test S3
-aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2
+aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2
 ```
 
 **✅ Benefits:**
@@ -112,7 +112,7 @@ I've created a script to help:
 
 ```bash
 # Copy to EC2
-scp configure_aws_ec2.sh ubuntu@3.150.215.121:~/
+scp configure_aws_ec2.sh ubuntu@YOUR_EC2_IP:~/
 
 # On EC2, run it
 chmod +x ~/configure_aws_ec2.sh

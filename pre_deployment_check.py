@@ -112,7 +112,7 @@ if os.path.exists("sagemaker_deploy.py"):
     with open("sagemaker_deploy.py", 'r') as f:
         deploy_content = f.read()
         # Check for configuration
-        if 'ROLE = "arn:aws:iam::098023138344:role/SageMakerFibroblastRole"' in deploy_content:
+        if 'ROLE = "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/SageMakerFibroblastRole"' in deploy_content:
             print("   ✅ IAM Role configured")
         else:
             warnings.append("IAM Role may need to be updated")
@@ -122,7 +122,7 @@ if os.path.exists("sagemaker_deploy.py"):
         else:
             warnings.append("Region may need to be updated")
         
-        if 'BUCKET_NAME = "fibroblast-detection-bucket"' in deploy_content:
+        if 'BUCKET_NAME = "YOUR_S3_BUCKET"' in deploy_content:
             print("   ✅ S3 Bucket configured")
         else:
             warnings.append("S3 Bucket name may need to be updated")

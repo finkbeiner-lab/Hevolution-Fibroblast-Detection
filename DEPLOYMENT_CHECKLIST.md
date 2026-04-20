@@ -21,9 +21,9 @@ python pre_deployment_check.py
 ## ✅ Deployment Configuration
 
 Current settings in `sagemaker_deploy.py`:
-- **IAM Role**: `arn:aws:iam::098023138344:role/SageMakerFibroblastRole`
+- **IAM Role**: `arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/SageMakerFibroblastRole`
 - **Region**: `us-east-2`
-- **S3 Bucket**: `fibroblast-detection-bucket`
+- **S3 Bucket**: `YOUR_S3_BUCKET`
 - **Instance Type**: `ml.g4dn.xlarge` (smallest GPU instance)
 - **Endpoint Name**: `fibroblast-detection-endpoint`
 
@@ -41,9 +41,9 @@ aws sso login --profile admin
 
 ### 2. Verify S3 Bucket Exists
 ```bash
-aws s3 ls s3://fibroblast-detection-bucket --region us-east-2
+aws s3 ls s3://YOUR_S3_BUCKET --region us-east-2
 # If it doesn't exist:
-aws s3 mb s3://fibroblast-detection-bucket --region us-east-2
+aws s3 mb s3://YOUR_S3_BUCKET --region us-east-2
 ```
 
 ### 3. Verify IAM Role Permissions
@@ -107,12 +107,12 @@ newgrp docker
 ### Model Artifact
 - Structure: `code/inference.py`, `requirements.txt`
 - Created automatically during deployment
-- Uploaded to: `s3://fibroblast-detection-bucket/models/fibroblast-detection-model/`
+- Uploaded to: `s3://YOUR_S3_BUCKET/models/fibroblast-detection-model/`
 
 ### Endpoint Configuration
 - Type: Asynchronous Inference
 - Instance: `ml.g4dn.xlarge` (GPU required)
-- Output: `s3://fibroblast-detection-bucket/async-inference/output/`
+- Output: `s3://YOUR_S3_BUCKET/async-inference/output/`
 - Max concurrent: 1 (GPU memory constraint)
 
 ## ✅ Everything Looks Good!

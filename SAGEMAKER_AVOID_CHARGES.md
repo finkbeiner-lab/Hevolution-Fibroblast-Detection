@@ -31,7 +31,7 @@ aws sagemaker delete-endpoint-config --endpoint-config-name fibroblast-detection
 
 ```bash
 aws sso login --profile admin
-python sagemaker_deploy.py --skip-ecr --image-uri 098023138344.dkr.ecr.us-east-2.amazonaws.com/fibroblast-detection:latest
+python sagemaker_deploy.py --skip-ecr --image-uri YOUR_AWS_ACCOUNT_ID.dkr.ecr.us-east-2.amazonaws.com/fibroblast-detection:latest
 ```
 
 (`--skip-ecr` skips Docker build/push and reuses the existing image.)

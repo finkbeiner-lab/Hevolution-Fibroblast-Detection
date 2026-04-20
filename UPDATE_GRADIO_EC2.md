@@ -9,7 +9,7 @@ Quick guide to update the Gradio app with the new status messages and better err
 From your local machine:
 
 ```bash
-scp Gradio-SageMaker.py ubuntu@3.150.215.121:~/fibroblast-app/
+scp Gradio-SageMaker.py ubuntu@YOUR_EC2_IP:~/fibroblast-app/
 ```
 
 ### 2. Restart Gradio Service
@@ -17,7 +17,7 @@ scp Gradio-SageMaker.py ubuntu@3.150.215.121:~/fibroblast-app/
 SSH into EC2:
 
 ```bash
-ssh -i your-key.pem ubuntu@3.150.215.121
+ssh -i your-key.pem ubuntu@YOUR_EC2_IP
 ```
 
 Then restart the service:
@@ -38,7 +38,7 @@ sudo journalctl -u gradio-app -f
 
 ### 3. Test the Update
 
-1. Open browser: `http://3.150.215.121:7860`
+1. Open browser: `http://YOUR_EC2_IP:7860`
 2. Upload an image
 3. Click "Run Detection"
 4. **You should now see:**

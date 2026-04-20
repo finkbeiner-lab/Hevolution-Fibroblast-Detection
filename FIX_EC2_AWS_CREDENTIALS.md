@@ -13,7 +13,7 @@ This is the best solution for production. The EC2 instance will automatically us
    - Select "EC2" as the service
    - Attach policies:
      - `AmazonSageMakerFullAccess` (or create scoped policy)
-     - `AmazonS3FullAccess` (or scoped to `fibroblast-detection-bucket` only)
+     - `AmazonS3FullAccess` (or scoped to `YOUR_S3_BUCKET` only)
    - Name it: `EC2-SageMaker-Role` (or similar)
    - Create role
 
@@ -33,7 +33,7 @@ This is the best solution for production. The EC2 instance will automatically us
 
 3. **Restart Gradio Service**:
    ```bash
-   ssh ubuntu@3.150.215.121
+   ssh ubuntu@YOUR_EC2_IP
    sudo systemctl restart gradio-app
    ```
 
@@ -54,7 +54,7 @@ If you're using AWS SSO, refresh the credentials:
 
 1. **SSH into EC2**:
    ```bash
-   ssh -i your-key.pem ubuntu@3.150.215.121
+   ssh -i your-key.pem ubuntu@YOUR_EC2_IP
    ```
 
 2. **Refresh SSO Credentials**:
@@ -71,7 +71,7 @@ If you're using AWS SSO, refresh the credentials:
 3. **Test Credentials**:
    ```bash
    aws sts get-caller-identity
-   aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2
+   aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2
    ```
 
 4. **Restart Gradio Service**:
@@ -94,7 +94,7 @@ If you have long-term access keys:
 
 1. **SSH into EC2**:
    ```bash
-   ssh ubuntu@3.150.215.121
+   ssh ubuntu@YOUR_EC2_IP
    ```
 
 2. **Create credentials file**:
@@ -133,7 +133,7 @@ After applying a solution:
    aws sts get-caller-identity
    
    # Test S3 access
-   aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2
+   aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2
    
    # Test SageMaker access
    aws sagemaker describe-endpoint \
@@ -142,7 +142,7 @@ After applying a solution:
    ```
 
 2. **Test Gradio App**:
-   - Open: `http://3.150.215.121:7860`
+   - Open: `http://YOUR_EC2_IP:7860`
    - Upload an image
    - Click "Run Detection"
    - Should work without credential errors
@@ -177,8 +177,8 @@ After applying a solution:
         "s3:ListBucket"
       ],
       "Resource": [
-        "arn:aws:s3:::fibroblast-detection-bucket",
-        "arn:aws:s3:::fibroblast-detection-bucket/*"
+        "arn:aws:s3:::YOUR_S3_BUCKET",
+        "arn:aws:s3:::YOUR_S3_BUCKET/*"
       ]
     },
     {

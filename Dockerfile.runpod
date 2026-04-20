@@ -1,0 +1,55 @@
+# RunPod Serverless worker for fibroblast segmentation.
+#
+# Pulls source directly from the public GitHub repo at build time.
+# To update the image, rebuild (optionally pinning REPO_REF to a commit
+# or tag) and push a new tag.
+#
+# Build (public repo, no auth required):
+#   docker build \
+#     --platform linux/amd64 \
+#     -f Dockerfile.runpod \
+#     -t <docker-user>/fibroblast-runpod:latest .
+#
+# Pin to a specific commit:
+#   docker build \
+#     --platform linux/amd64 \
+#     --build-arg REPO_REF=<commit-sha> \
+#     -f Dockerfile.runpod \
+#     -t <docker-user>/fibroblast-runpod:<sha> .
+
+FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    MPLBACKEND=Agg \
+    CELLPOSE_LOCAL_MODELS_PATH=/opt/cellpose_models
+
+# Override at build time with --build-arg REPO_URL=... / REPO_REF=...
+ARG REPO_URL=https://github.com/finkbeiner-lab/Hevolution-Fibroblast-Detection.git
+ARG REPO_REF=main
+
+# System libs: git to clone, libgl/libglib for OpenCV + matplotlib runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git ca-certificates libglib2.0-0 libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Shallow-clone the repo at the requested ref, then strip .git metadata.
+RUN git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" /app/repo \
+    && rm -rf /app/repo/.git \
+    && ls /app/repo/runpod_handler.py /app/repo/requirements-runpod.txt
+
+# Install Python deps from the cloned tree.
+RUN pip install --no-cache-dir -r /app/repo/requirements-runpod.txt
+
+# Pre-download the Cellpose 'cyto3' weights into the image so cold starts
+# don't re-download ~25 MB of weights on every new worker.
+RUN mkdir -p "$CELLPOSE_LOCAL_MODELS_PATH" && \
+    python -c "from cellpose import models; models.Cellpose(gpu=False, model_type='cyto3')"
+
+WORKDIR /app/repo
+
+# RunPod Serverless entrypoint.
+CMD ["python", "-u", "runpod_handler.py"]

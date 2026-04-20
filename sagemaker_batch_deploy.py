@@ -18,9 +18,9 @@ import os
 import json
 
 # Configuration
-ROLE = "arn:aws:iam::098023138344:role/SageMakerFibroblastRole"
+ROLE = "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/SageMakerFibroblastRole"
 REGION = "us-east-2"
-BUCKET_NAME = "fibroblast-detection-bucket"
+BUCKET_NAME = "YOUR_S3_BUCKET"
 MODEL_NAME = "fibroblast-detection-batch-model"
 AWS_PROFILE = os.environ.get("AWS_PROFILE", "admin")
 

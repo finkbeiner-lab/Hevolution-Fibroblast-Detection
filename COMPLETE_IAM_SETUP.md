@@ -128,7 +128,7 @@ aws sts get-caller-identity
 # Should show: arn:aws:sts::ACCOUNT:assumed-role/SageMakerFibroblastRole/...
 
 # Test S3
-aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2
+aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2
 
 # Restart Gradio
 sudo systemctl restart gradio-app

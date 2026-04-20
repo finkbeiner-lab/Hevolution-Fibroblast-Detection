@@ -24,9 +24,9 @@ except ImportError as e:
     raise
 
 # Configuration
-ROLE = "arn:aws:iam::098023138344:role/SageMakerFibroblastRole"  # Update with your IAM role
+ROLE = "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/SageMakerFibroblastRole"  # Update with your IAM role
 REGION = "us-east-2"  # Update with your preferred region
-BUCKET_NAME = "fibroblast-detection-bucket"  # Update with your S3 bucket name
+BUCKET_NAME = "YOUR_S3_BUCKET"  # Update with your S3 bucket name
 
 # AWS profile for SSO and CLI subprocess calls (default: admin)
 AWS_PROFILE = os.environ.get("AWS_PROFILE", "admin")

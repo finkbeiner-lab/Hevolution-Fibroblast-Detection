@@ -8,7 +8,7 @@ You already have the IAM role `SageMakerFibroblastRole`. Here's how to attach it
    - AWS Console → EC2 → Instances
 
 2. **Select your instance:**
-   - Find the instance with IP `3.150.215.121` (or your instance)
+   - Find the instance with IP `YOUR_EC2_IP` (or your instance)
    - Click the checkbox next to it
 
 3. **Attach IAM role:**
@@ -29,7 +29,7 @@ You already have the IAM role `SageMakerFibroblastRole`. Here's how to attach it
    # Should show the IAM role ARN, not your user
    
    # Test S3 access
-   aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2
+   aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2
    
    # Restart Gradio
    sudo systemctl restart gradio-app
@@ -88,7 +88,7 @@ aws sts get-caller-identity
 # Should show ARN like: arn:aws:sts::ACCOUNT:assumed-role/SageMakerFibroblastRole/i-xxxxx
 
 # Test S3
-aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2
+aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2
 ```
 
 ## 🔧 After Attaching Role
@@ -124,7 +124,7 @@ sudo journalctl -u gradio-app -f
 unset AWS_PROFILE AWS_DEFAULT_PROFILE && \
 rm ~/.aws/credentials 2>/dev/null && \
 aws sts get-caller-identity && \
-aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2 && \
+aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2 && \
 sudo systemctl restart gradio-app
 ```
 

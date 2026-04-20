@@ -54,7 +54,7 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo "Testing credentials..."
     if aws sts get-caller-identity 2>/dev/null; then
         echo "✅ Credentials configured successfully!"
-        aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2 && echo "✅ S3 access working!"
+        aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2 && echo "✅ S3 access working!"
     else
         echo "❌ Credentials test failed"
     fi
@@ -72,8 +72,8 @@ echo "1. On your local machine, run:"
 echo "   aws sso login --profile your-profile"
 echo ""
 echo "2. Copy the credentials from your local machine to EC2:"
-echo "   scp ~/.aws/credentials ubuntu@3.150.215.121:~/.aws/"
-echo "   scp ~/.aws/config ubuntu@3.150.215.121:~/.aws/"
+echo "   scp ~/.aws/credentials ubuntu@YOUR_EC2_IP:~/.aws/"
+echo "   scp ~/.aws/config ubuntu@YOUR_EC2_IP:~/.aws/"
 echo ""
 echo "3. But note: SSO credentials expire, so this is temporary!"
 echo ""

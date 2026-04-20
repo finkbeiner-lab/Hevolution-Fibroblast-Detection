@@ -100,7 +100,7 @@ WorkingDirectory=/home/ubuntu/fibroblast-app
 Environment="PATH=/home/ubuntu/fibroblast-app/venv/bin"
 Environment="SAGEMAKER_ENDPOINT_NAME=fibroblast-detection-endpoint"
 Environment="AWS_REGION=us-east-2"
-Environment="S3_BUCKET=fibroblast-detection-bucket"
+Environment="S3_BUCKET=YOUR_S3_BUCKET"
 Environment="GRADIO_SERVER_NAME=127.0.0.1"
 Environment="GRADIO_SERVER_PORT=7860"
 ExecStart=/home/ubuntu/fibroblast-app/venv/bin/python /home/ubuntu/fibroblast-app/Gradio-SageMaker.py
@@ -237,7 +237,7 @@ The systemd service already sets these, but you can also set them manually:
 ```bash
 export SAGEMAKER_ENDPOINT_NAME="fibroblast-detection-endpoint"
 export AWS_REGION="us-east-2"
-export S3_BUCKET="fibroblast-detection-bucket"
+export S3_BUCKET="YOUR_S3_BUCKET"
 export GRADIO_SERVER_NAME="127.0.0.1"
 export GRADIO_SERVER_PORT="7860"
 ```

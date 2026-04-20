@@ -31,7 +31,7 @@ pip install gradio>=4.0.0 boto3>=1.26.0 Pillow>=9.0.0
 # Set environment variables (optional, uses defaults if not set)
 export SAGEMAKER_ENDPOINT_NAME="fibroblast-detection-endpoint"
 export AWS_REGION="us-east-2"
-export S3_BUCKET="fibroblast-detection-bucket"
+export S3_BUCKET="YOUR_S3_BUCKET"
 
 # Run Gradio
 python Gradio-SageMaker.py
@@ -70,10 +70,10 @@ aws sagemaker describe-endpoint \
 
 ```bash
 # List bucket contents
-aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2
+aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2
 
 # Check async-inference directories
-aws s3 ls s3://fibroblast-detection-bucket/async-inference/ --recursive --region us-east-2
+aws s3 ls s3://YOUR_S3_BUCKET/async-inference/ --recursive --region us-east-2
 ```
 
 ### Test 3: Direct API Test
@@ -95,7 +95,7 @@ with open('test_image.jpg', 'rb') as f:
 # Upload to S3
 payload = {'image': image_b64, 'diameter': 30, 'denoise': False, 'blur': False}
 s3_client.put_object(
-    Bucket='fibroblast-detection-bucket',
+    Bucket='YOUR_S3_BUCKET',
     Key='async-inference/input/test.json',
     Body=json.dumps(payload)
 )
@@ -103,7 +103,7 @@ s3_client.put_object(
 # Invoke
 response = sagemaker_runtime.invoke_endpoint_async(
     EndpointName='fibroblast-detection-endpoint',
-    InputLocation='s3://fibroblast-detection-bucket/async-inference/input/test.json',
+    InputLocation='s3://YOUR_S3_BUCKET/async-inference/input/test.json',
     ContentType='application/json'
 )
 
@@ -144,12 +144,12 @@ aws sagemaker list-endpoints --region us-east-2
 
 **Solution:**
 - Check IAM role/permissions
-- Verify bucket name: `fibroblast-detection-bucket`
+- Verify bucket name: `YOUR_S3_BUCKET`
 - Check region: `us-east-2`
 
 ```bash
 # Test S3 access
-aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2
+aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2
 ```
 
 ### Issue: "Timeout" waiting for results

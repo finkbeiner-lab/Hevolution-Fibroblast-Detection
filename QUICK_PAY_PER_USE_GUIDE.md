@@ -24,26 +24,26 @@ python sagemaker_deploy.py --serverless --image-uri YOUR_ECR_IMAGE_URI
 
 ```bash
 # Step 1: Upload images to S3 (or use --input-dir)
-aws s3 sync ./my_images/ s3://fibroblast-detection-bucket/batch-input/
+aws s3 sync ./my_images/ s3://YOUR_S3_BUCKET/batch-input/
 
 # Step 2: Run batch job with GPU
 python sagemaker_batch_deploy.py \
   --image-uri YOUR_ECR_IMAGE_URI \
-  --model-uri s3://fibroblast-detection-bucket/models/fibroblast-detection-model/model.tar.gz \
-  --input-s3 s3://fibroblast-detection-bucket/batch-input/ \
-  --output-s3 s3://fibroblast-detection-bucket/batch-output/ \
+  --model-uri s3://YOUR_S3_BUCKET/models/fibroblast-detection-model/model.tar.gz \
+  --input-s3 s3://YOUR_S3_BUCKET/batch-input/ \
+  --output-s3 s3://YOUR_S3_BUCKET/batch-output/ \
   --monitor
 
 # Or process local directory directly:
 python sagemaker_batch_deploy.py \
   --image-uri YOUR_ECR_IMAGE_URI \
-  --model-uri s3://fibroblast-detection-bucket/models/fibroblast-detection-model/model.tar.gz \
+  --model-uri s3://YOUR_S3_BUCKET/models/fibroblast-detection-model/model.tar.gz \
   --input-dir ./my_images/ \
-  --output-s3 s3://fibroblast-detection-bucket/batch-output/ \
+  --output-s3 s3://YOUR_S3_BUCKET/batch-output/ \
   --monitor
 
 # Step 3: Download results
-aws s3 sync s3://fibroblast-detection-bucket/batch-output/ ./results/
+aws s3 sync s3://YOUR_S3_BUCKET/batch-output/ ./results/
 ```
 
 ✅ Best for: Batch processing, weekly/daily jobs, full GPU performance
@@ -71,7 +71,7 @@ aws s3 sync s3://fibroblast-detection-bucket/batch-output/ ./results/
 python sagemaker_deploy.py --setup-ecr-only
 
 # This will output your ECR image URI:
-# 098023138344.dkr.ecr.us-east-2.amazonaws.com/fibroblast-detection:latest
+# YOUR_AWS_ACCOUNT_ID.dkr.ecr.us-east-2.amazonaws.com/fibroblast-detection:latest
 ```
 
 ### Deploy Serverless Endpoint
@@ -81,7 +81,7 @@ python sagemaker_deploy.py --setup-ecr-only
 python sagemaker_deploy.py \
   --serverless \
   --skip-ecr \
-  --image-uri 098023138344.dkr.ecr.us-east-2.amazonaws.com/fibroblast-detection:latest
+  --image-uri YOUR_AWS_ACCOUNT_ID.dkr.ecr.us-east-2.amazonaws.com/fibroblast-detection:latest
 ```
 
 ### Run Batch Job (GPU)
@@ -89,10 +89,10 @@ python sagemaker_deploy.py \
 ```bash
 # Process local images with GPU
 python sagemaker_batch_deploy.py \
-  --image-uri 098023138344.dkr.ecr.us-east-2.amazonaws.com/fibroblast-detection:latest \
-  --model-uri s3://fibroblast-detection-bucket/models/fibroblast-detection-model/model.tar.gz \
+  --image-uri YOUR_AWS_ACCOUNT_ID.dkr.ecr.us-east-2.amazonaws.com/fibroblast-detection:latest \
+  --model-uri s3://YOUR_S3_BUCKET/models/fibroblast-detection-model/model.tar.gz \
   --input-dir ./images/ \
-  --output-s3 s3://fibroblast-detection-bucket/results/ \
+  --output-s3 s3://YOUR_S3_BUCKET/results/ \
   --monitor
 ```
 

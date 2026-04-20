@@ -16,7 +16,7 @@ import io
 # Configuration
 ENDPOINT_NAME = os.getenv("SAGEMAKER_ENDPOINT_NAME", "fibroblast-detection-endpoint")
 REGION = os.getenv("AWS_REGION", "us-east-2")
-BUCKET_NAME = os.getenv("S3_BUCKET", "fibroblast-detection-bucket")
+BUCKET_NAME = os.getenv("S3_BUCKET", "YOUR_S3_BUCKET")
 
 # Initialize AWS clients
 s3_client = boto3.client('s3', region_name=REGION)

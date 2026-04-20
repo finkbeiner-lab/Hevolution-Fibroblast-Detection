@@ -12,7 +12,7 @@ if aws sts get-caller-identity 2>/dev/null; then
     echo "✅ Credentials are valid!"
     echo ""
     echo "Testing S3 access..."
-    if aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2 2>/dev/null; then
+    if aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2 2>/dev/null; then
         echo "✅ S3 access working!"
         exit 0
     else
@@ -47,7 +47,7 @@ if [ -n "$INSTANCE_ID" ]; then
         echo ""
         echo "Then test again:"
         echo "  aws sts get-caller-identity"
-        echo "  aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2"
+        echo "  aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2"
     else
         echo "❌ No IAM role attached to this instance"
         echo ""

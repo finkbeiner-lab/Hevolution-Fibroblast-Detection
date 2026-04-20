@@ -94,7 +94,7 @@ if [ -n "$ROLE" ] && [ "$ROLE" != "404 - Not Found" ]; then
         echo ""
         
         echo "Testing S3 access..."
-        if aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2 2>/dev/null; then
+        if aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2 2>/dev/null; then
             echo "✅ S3 access working!"
             echo ""
             

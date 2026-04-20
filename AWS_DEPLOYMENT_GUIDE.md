@@ -28,7 +28,7 @@ Your application uses:
 aws configure
 
 # Create S3 bucket
-aws s3 mb s3://fibroblast-detection-bucket --region us-east-2
+aws s3 mb s3://YOUR_S3_BUCKET --region us-east-2
 ```
 
 ### 2. Install Dependencies
@@ -54,9 +54,9 @@ Ensure you have an IAM role with:
 - `AmazonEC2ContainerRegistryFullAccess`
 
 **Current configuration in script:**
-- **ROLE**: `arn:aws:iam::098023138344:role/SageMakerFibroblastRole`
+- **ROLE**: `arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/SageMakerFibroblastRole`
 - **REGION**: `us-east-2`
-- **BUCKET**: `fibroblast-detection-bucket`
+- **BUCKET**: `YOUR_S3_BUCKET`
 
 ---
 
@@ -116,7 +116,7 @@ newgrp docker
 ### S3 Bucket Not Found
 ```bash
 # Create bucket
-aws s3 mb s3://fibroblast-detection-bucket --region us-east-2
+aws s3 mb s3://YOUR_S3_BUCKET --region us-east-2
 ```
 
 ### Import Errors
@@ -157,7 +157,7 @@ payload = {
 # Upload to S3
 s3 = boto3.client('s3')
 s3.put_object(
-    Bucket='fibroblast-detection-bucket',
+    Bucket='YOUR_S3_BUCKET',
     Key='async-inference/input/request.json',
     Body=json.dumps(payload)
 )
@@ -165,7 +165,7 @@ s3.put_object(
 # Invoke async endpoint
 response = sagemaker_runtime.invoke_endpoint_async(
     EndpointName='fibroblast-detection-endpoint',
-    InputLocation='s3://fibroblast-detection-bucket/async-inference/input/request.json',
+    InputLocation='s3://YOUR_S3_BUCKET/async-inference/input/request.json',
     ContentType='application/json'
 )
 
@@ -177,7 +177,7 @@ import time
 while True:
     try:
         result = s3.get_object(
-            Bucket='fibroblast-detection-bucket',
+            Bucket='YOUR_S3_BUCKET',
             Key=output_location.split('/')[-1]
         )
         results = json.loads(result['Body'].read())

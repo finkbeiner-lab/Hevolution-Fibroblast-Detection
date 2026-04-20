@@ -64,7 +64,7 @@ git clone <your-repo-url> .
 **Option A: Use IAM Role (Recommended)**
 1. Create IAM role with permissions:
    - `AmazonSageMakerFullAccess` (or scoped to your endpoint)
-   - `AmazonS3FullAccess` (or scoped to `fibroblast-detection-bucket`)
+   - `AmazonS3FullAccess` (or scoped to `YOUR_S3_BUCKET`)
 2. Attach role to EC2 instance:
    - EC2 Console → Select instance → Actions → Security → Modify IAM role
 
@@ -81,7 +81,7 @@ The script uses these defaults, but you can override:
 ```bash
 export SAGEMAKER_ENDPOINT_NAME="fibroblast-detection-endpoint"
 export AWS_REGION="us-east-2"
-export S3_BUCKET="fibroblast-detection-bucket"
+export S3_BUCKET="YOUR_S3_BUCKET"
 export GRADIO_SERVER_NAME="0.0.0.0"  # Listen on all interfaces
 export GRADIO_SERVER_PORT="7860"
 ```
@@ -124,7 +124,7 @@ WorkingDirectory=/home/ubuntu/fibroblast-app
 Environment="PATH=/home/ubuntu/fibroblast-app/venv/bin"
 Environment="SAGEMAKER_ENDPOINT_NAME=fibroblast-detection-endpoint"
 Environment="AWS_REGION=us-east-2"
-Environment="S3_BUCKET=fibroblast-detection-bucket"
+Environment="S3_BUCKET=YOUR_S3_BUCKET"
 Environment="GRADIO_SERVER_NAME=0.0.0.0"
 Environment="GRADIO_SERVER_PORT=7860"
 ExecStart=/home/ubuntu/fibroblast-app/venv/bin/python /home/ubuntu/fibroblast-app/Gradio-SageMaker.py
@@ -170,7 +170,7 @@ Make sure your EC2 security group allows inbound traffic:
 
 2. **Test S3 access:**
    ```bash
-   aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2
+   aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2
    ```
 
 3. **Access Gradio UI:**
@@ -188,7 +188,7 @@ Make sure your EC2 security group allows inbound traffic:
 
 ### "Access Denied" to S3
 - Check IAM role has S3 permissions
-- Verify bucket name: `fibroblast-detection-bucket`
+- Verify bucket name: `YOUR_S3_BUCKET`
 - Check bucket exists in `us-east-2`
 
 ### Gradio not accessible from browser
@@ -206,7 +206,7 @@ Make sure your EC2 security group allows inbound traffic:
 Your Gradio app is configured to use:
 - **Endpoint:** `fibroblast-detection-endpoint`
 - **Region:** `us-east-2`
-- **S3 Bucket:** `fibroblast-detection-bucket`
+- **S3 Bucket:** `YOUR_S3_BUCKET`
 - **Port:** 7860
 
 All set! You can now upload images through the Gradio interface. 🎉

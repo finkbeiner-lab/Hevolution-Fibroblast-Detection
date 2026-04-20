@@ -1,2 +1,47 @@
+# Secrets / credentials — NEVER commit
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+.env
+.env.*
+!.env.example
+.aws/
+credentials
+credentials.*
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.token
+*_token
+*_secret
+
+# Model artifacts / large binaries
+model.tar.gz
+model_artifact/
+*.pth
+*.ckpt
+
+# Research outputs / intermediate data
 masks/
 plots/
+temp_results/
+docker_test_results/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

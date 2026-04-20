@@ -75,9 +75,9 @@ import sagemaker
 from sagemaker.model import Model
 from datetime import datetime
 
-ROLE = "arn:aws:iam::098023138344:role/SageMakerFibroblastRole"
+ROLE = "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/SageMakerFibroblastRole"
 REGION = "us-east-2"
-BUCKET_NAME = "fibroblast-detection-bucket"
+BUCKET_NAME = "YOUR_S3_BUCKET"
 MODEL_NAME = "fibroblast-detection-model"
 
 sess = sagemaker.Session()
@@ -197,17 +197,17 @@ if __name__ == "__main__":
 
 ```bash
 # 1. Upload input images to S3
-aws s3 sync ./input_images/ s3://fibroblast-detection-bucket/batch-input/
+aws s3 sync ./input_images/ s3://YOUR_S3_BUCKET/batch-input/
 
 # 2. Run batch transform job
 python sagemaker_batch_deploy.py \
   --image-uri YOUR_ECR_IMAGE_URI \
-  --model-uri s3://fibroblast-detection-bucket/models/fibroblast-detection-model/model.tar.gz \
-  --input s3://fibroblast-detection-bucket/batch-input/ \
-  --output s3://fibroblast-detection-bucket/batch-output/
+  --model-uri s3://YOUR_S3_BUCKET/models/fibroblast-detection-model/model.tar.gz \
+  --input s3://YOUR_S3_BUCKET/batch-input/ \
+  --output s3://YOUR_S3_BUCKET/batch-output/
 
 # 3. Download results when complete
-aws s3 sync s3://fibroblast-detection-bucket/batch-output/ ./results/
+aws s3 sync s3://YOUR_S3_BUCKET/batch-output/ ./results/
 ```
 
 ### Pricing Example

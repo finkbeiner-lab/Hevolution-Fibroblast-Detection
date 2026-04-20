@@ -33,7 +33,7 @@ fi
 # Test S3
 echo ""
 echo "Step 3: Testing S3 access..."
-if aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2 2>/dev/null; then
+if aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2 2>/dev/null; then
     echo "✅ S3 access working!"
 else
     echo "❌ S3 access failed"
@@ -102,7 +102,7 @@ echo "  ✅ S3 access confirmed"
 echo "  ✅ Gradio service restarted"
 echo ""
 echo "Next steps:"
-echo "  1. Test Gradio app: http://3.150.215.121:7860"
+echo "  1. Test Gradio app: http://YOUR_EC2_IP:7860"
 echo "  2. Upload an image"
 echo "  3. Click 'Run Detection'"
 echo "  4. Should work without credential errors!"

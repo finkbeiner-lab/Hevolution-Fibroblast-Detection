@@ -1,0 +1,5 @@
+# Install on the AWS box that runs the Gradio UI.
+# No torch / cellpose / opencv needed here - the heavy work runs on RunPod.
+gradio>=4.0.0
+requests>=2.31.0
+Pillow>=9.5.0

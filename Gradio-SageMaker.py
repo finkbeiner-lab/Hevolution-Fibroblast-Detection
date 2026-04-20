@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Configuration - Set via environment variables or update here
 ENDPOINT_NAME = os.getenv("SAGEMAKER_ENDPOINT_NAME", "fibroblast-detection-endpoint")
 REGION = os.getenv("AWS_REGION", "us-east-2")
-BUCKET_NAME = os.getenv("S3_BUCKET", "fibroblast-detection-bucket")
+BUCKET_NAME = os.getenv("S3_BUCKET", "YOUR_S3_BUCKET")
 
 # Initialize AWS clients with error handling
 def get_aws_clients():
@@ -155,7 +155,7 @@ def invoke_sagemaker_endpoint(image, diameter, denoise, blur):
                 error = (
                     "❌ AWS token has expired.\n\n"
                     "**Quick Fix:**\n"
-                    "1. SSH into EC2: `ssh ubuntu@3.150.215.121`\n"
+                    "1. SSH into EC2: `ssh ubuntu@YOUR_EC2_IP`\n"
                     "2. Refresh credentials: `aws sso login` (if using SSO)\n"
                     "3. Restart service: `sudo systemctl restart gradio-app`\n\n"
                     "**Better Solution:**\n"

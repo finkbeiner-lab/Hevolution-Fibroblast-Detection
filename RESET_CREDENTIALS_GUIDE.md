@@ -17,7 +17,7 @@ curl http://169.254.169.254/latest/meta-data/iam/security-credentials/
 
 # If IAM role exists, test it:
 aws sts get-caller-identity
-aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2
+aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2
 
 # If IAM role works, you're done! If not, configure credentials:
 aws configure
@@ -47,7 +47,7 @@ curl http://169.254.169.254/latest/meta-data/iam/security-credentials/
 # If it shows a role name (e.g., "EC2-SageMaker-Role"):
 #   → IAM role is attached, test it:
 aws sts get-caller-identity
-aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2
+aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2
 
 # If it works, you're done! No need to configure credentials.
 # If it shows "404 - Not Found", continue to Step 3.
@@ -81,7 +81,7 @@ aws sso login
 aws sts get-caller-identity
 
 # Test S3 access
-aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2
+aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2
 
 # Test SageMaker access
 aws sagemaker describe-endpoint \
@@ -107,7 +107,7 @@ I've created a script that does all of this automatically:
 
 ```bash
 # Copy script to EC2 (from your local machine)
-scp reset_aws_credentials.sh ubuntu@3.150.215.121:~/
+scp reset_aws_credentials.sh ubuntu@YOUR_EC2_IP:~/
 
 # On EC2, run it
 chmod +x ~/reset_aws_credentials.sh
@@ -154,7 +154,7 @@ After resetting, verify everything works:
 aws sts get-caller-identity
 
 # 2. Test S3
-aws s3 ls s3://fibroblast-detection-bucket/ --region us-east-2
+aws s3 ls s3://YOUR_S3_BUCKET/ --region us-east-2
 
 # 3. Test Gradio
 curl http://localhost:7860
@@ -171,7 +171,7 @@ sudo journalctl -u gradio-app -n 50
 
 ### "Access Denied"
 - Check IAM permissions (S3 and SageMaker access)
-- Verify bucket name: `fibroblast-detection-bucket`
+- Verify bucket name: `YOUR_S3_BUCKET`
 - Verify region: `us-east-2`
 
 ### "ExpiredToken" still appears
