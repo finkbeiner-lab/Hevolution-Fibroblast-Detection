@@ -42,7 +42,12 @@ RUN git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" /app/repo \
     && ls /app/repo/runpod_handler.py /app/repo/requirements-runpod.txt
 
 # Install Python deps from the cloned tree.
-RUN pip install --no-cache-dir -r /app/repo/requirements-runpod.txt
+# Defensive force-reinstall of numpy<2 at the end: opencv or another
+# transitive dep can drag numpy 2.x in despite the pin, which silently
+# breaks torch's NumPy integration and cascades into cellpose failing
+# to expose `Cellpose`.
+RUN pip install --no-cache-dir -r /app/repo/requirements-runpod.txt && \
+    pip install --no-cache-dir --force-reinstall --no-deps "numpy<2"
 
 # Pre-download the Cellpose 'cyto3' weights into the image so cold starts
 # don't re-download ~25 MB of weights on every new worker.

@@ -1,6 +1,8 @@
+# NOTE: torch comes from the base image (runpod/pytorch 2.1.0, built against
+# NumPy 1.x). Do NOT upgrade numpy past 2.x or torch's C extensions break.
 runpod>=1.6.0
-cellpose>=3.0.0
-numpy>=1.24
+cellpose>=3.0.0,<4.0
+numpy>=1.24,<2.0
 Pillow>=9.5
-opencv-python-headless>=4.8
+opencv-python-headless>=4.8,<4.10
 matplotlib>=3.7
