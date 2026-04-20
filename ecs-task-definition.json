@@ -1,0 +1,44 @@
+{
+  "family": "fibroblast-detection",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["EC2"],
+  "cpu": "4096",
+  "memory": "16384",
+  "containerDefinitions": [
+    {
+      "name": "fibroblast-detection-container",
+      "image": "YOUR_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/fibroblast-detection:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 7860,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "GRADIO_SERVER_NAME",
+          "value": "0.0.0.0"
+        },
+        {
+          "name": "GRADIO_SERVER_PORT",
+          "value": "7860"
+        }
+      ],
+      "resourceRequirements": [
+        {
+          "type": "GPU",
+          "value": "1"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/fibroblast-detection",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

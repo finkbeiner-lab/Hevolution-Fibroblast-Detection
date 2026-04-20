@@ -106,7 +106,7 @@ def process_image(image, diameter=None, denoise=False, blur=False):
 # ----------------- Gradio UI -----------------
 
 with gr.Blocks() as demo:
-    gr.Markdown("## 🧪 Cellpose Segmentation with Matplotlib Visualizations")
+    gr.Markdown("## 🧪 Fibroblast Confluency detection with Matplotlib Visualizations")
 
     with gr.Row():
         with gr.Column():
@@ -114,7 +114,7 @@ with gr.Blocks() as demo:
             diameter_slider = gr.Slider(minimum=5, maximum=100, step=1, value=30, label="Approx. Cell Diameter")
             denoise_checkbox = gr.Checkbox(label="Apply Denoising")
             blur_checkbox = gr.Checkbox(label="Apply Gaussian Blur")
-            run_btn = gr.Button("Run Cellpose")
+            run_btn = gr.Button("Run Detection")
 
         with gr.Column():
             stats_output = gr.Markdown(label="Statistics")
@@ -128,4 +128,14 @@ with gr.Blocks() as demo:
         outputs=[output1, output2, output3, stats_output]
     )
 
-demo.launch()
+if __name__ == "__main__":
+    # Allow configuration via environment variables for deployment
+    server_name = os.getenv("GRADIO_SERVER_NAME", "127.0.0.1")
+    server_port = int(os.getenv("GRADIO_SERVER_PORT", "7860"))
+    share = os.getenv("GRADIO_SHARE", "False").lower() == "true"
+    
+    demo.launch(
+        server_name=server_name,
+        server_port=server_port,
+        share=share
+    )

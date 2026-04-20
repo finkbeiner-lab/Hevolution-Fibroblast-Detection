@@ -1,0 +1,16 @@
+#!/bin/bash
+# SageMaker serve entrypoint wrapper
+# The sagemaker-inference package uses model_server module
+
+set -e
+
+# Extract model if it's a tar.gz file
+if [ -f /opt/ml/model/model.tar.gz ] && [ ! -d /opt/ml/model/code ]; then
+    echo "Extracting model.tar.gz..."
+    cd /opt/ml/model
+    tar -xzf model.tar.gz
+    echo "Model extracted"
+fi
+
+# Start the SageMaker model server
+exec python3 -c "from sagemaker_inference import model_server; model_server.start_model_server()"

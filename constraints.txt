@@ -1,0 +1,3 @@
+# Constraints file to lock NumPy version
+# PyTorch 2.0.1 requires NumPy < 2.0
+numpy==1.24.4
