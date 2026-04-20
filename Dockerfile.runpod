@@ -17,7 +17,7 @@
 #     -f Dockerfile.runpod \
 #     -t <docker-user>/fibroblast-runpod:<sha> .
 
-FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
+FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -42,12 +42,7 @@ RUN git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" /app/repo \
     && ls /app/repo/runpod_handler.py /app/repo/requirements-runpod.txt
 
 # Install Python deps from the cloned tree.
-# Defensive force-reinstall of numpy<2 at the end: opencv or another
-# transitive dep can drag numpy 2.x in despite the pin, which silently
-# breaks torch's NumPy integration and cascades into cellpose failing
-# to expose `Cellpose`.
-RUN pip install --no-cache-dir -r /app/repo/requirements-runpod.txt && \
-    pip install --no-cache-dir --force-reinstall --no-deps "numpy<2"
+RUN pip install --no-cache-dir -r /app/repo/requirements-runpod.txt
 
 # Pre-download the Cellpose 'cyto3' weights into the image so cold starts
 # don't re-download ~25 MB of weights on every new worker.
