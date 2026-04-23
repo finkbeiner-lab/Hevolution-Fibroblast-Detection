@@ -8,12 +8,16 @@ Input JSON (job["input"]):
     diameter  : float (optional) approx. cell diameter (px). null => auto.
     denoise   : bool  (optional, default false)
     blur      : bool  (optional, default false)
+    cell_line : str   (optional) GESTALT / Coriell cell line ID (e.g. "AG08498").
+                      Persisted into stats.json so downstream analysis can
+                      join image -> cell_line -> donor age for model training.
 
 Output JSON:
     cell_count      : int
     confluency      : float   (percent)
     min_intensity   : int
     max_intensity   : int
+    cell_line       : str|null  (echoed back for convenience)
     normalized_b64  : str     PNG base64
     mask_b64        : str     PNG base64
     histogram_b64   : str     PNG base64
@@ -225,6 +229,9 @@ def handler(job):
 
         denoise = bool(job_input.get("denoise", False))
         blur = bool(job_input.get("blur", False))
+        cell_line = job_input.get("cell_line")
+        if cell_line is not None:
+            cell_line = str(cell_line).strip() or None
 
         pil = _b64_to_pil(image_b64)
         img = np.array(pil)
@@ -274,11 +281,17 @@ def handler(job):
             mask_img=mask_img,
             hist_img=hist_img,
             stats=stats,
-            params={"diameter": diameter, "denoise": denoise, "blur": blur},
+            params={
+                "diameter": diameter,
+                "denoise": denoise,
+                "blur": blur,
+                "cell_line": cell_line,
+            },
         )
 
         response = {
             **stats,
+            "cell_line": cell_line,
             "normalized_b64": _pil_to_b64(norm_img),
             "mask_b64": _pil_to_b64(mask_img),
             "histogram_b64": _pil_to_b64(hist_img),

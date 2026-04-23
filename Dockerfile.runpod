@@ -23,7 +23,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     MPLBACKEND=Agg \
-    CELLPOSE_LOCAL_MODELS_PATH=/opt/cellpose_models
+    CELLPOSE_LOCAL_MODELS_PATH=/runpod-volume/cellpose_models
 
 # Override at build time with --build-arg REPO_URL=... / REPO_REF=...
 ARG REPO_URL=https://github.com/finkbeiner-lab/Hevolution-Fibroblast-Detection.git
@@ -44,10 +44,13 @@ RUN git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" /app/repo \
 # Install Python deps from the cloned tree.
 RUN pip install --no-cache-dir -r /app/repo/requirements-runpod.txt
 
-# Pre-download the Cellpose 'cyto3' weights into the image so cold starts
-# don't re-download ~25 MB of weights on every new worker.
-RUN mkdir -p "$CELLPOSE_LOCAL_MODELS_PATH" && \
-    python -c "from cellpose import models; models.Cellpose(gpu=False, model_type='cyto3')"
+# Cellpose weights live on the RunPod Network Volume mounted at
+# /runpod-volume (see CELLPOSE_LOCAL_MODELS_PATH above). Pre-populate
+# the volume once via a temporary Pod with these two files:
+#   /runpod-volume/cellpose_models/cyto3           (~26 MB, main weights)
+#   /runpod-volume/cellpose_models/size_cyto3.npy  (~3.6 KB, size model)
+# Every serverless worker then reads from the volume instead of
+# downloading on each cold start.
 
 WORKDIR /app/repo
 
