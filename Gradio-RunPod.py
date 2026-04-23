@@ -42,16 +42,17 @@ AUTH_HEADER = {"Authorization": f"Bearer {RUNPOD_API_KEY}"} if RUNPOD_API_KEY el
 # donor age) without any re-labeling step. Edit to match what your lab uses.
 GESTALT_CELL_LINES = [
     "(Not specified)",
-    "AG04054",
-    "AG04148",
-    "AG04439",
-    "AG05026",
-    "AG06561",
-    "AG08498",
-    "AG08517",
-    "AG09319",
-    "AG11747",
-    "AG13145",
+    "TP0149 A",
+    "TP0197 A",
+    "TP0202 A",
+    "TP0258 A",
+    "TP0279 A",
+    "TP0298 A",
+    "TP0357 A",
+    "TP0359 A",
+    "TP0388 A",
+    "TP0397 A",
+    "TP0398 A",
     "Other",
 ]
 
@@ -226,9 +227,9 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
                 lines=2,
             )
             stats_output = gr.Markdown(label="Statistics")
-            output1 = gr.Image(label="Normalized Image", interactive=False, show_download_button=True)
-            output2 = gr.Image(label="Segmentation Mask", interactive=False, show_download_button=True, height=300)
-            output3 = gr.Image(label="Intensity Histogram", interactive=False, show_download_button=True)
+            output1 = gr.Image(label="Normalized Image", interactive=False)
+            output2 = gr.Image(label="Segmentation Mask", interactive=False, height=300)
+            output3 = gr.Image(label="Intensity Histogram", interactive=False)
 
     run_btn.click(
         fn=invoke_runpod,
