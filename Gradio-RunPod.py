@@ -68,6 +68,7 @@ GESTALT_CELL_LINES = [
     "Other",
 ]
 
+AUTO_MODE = "Automatic"
 SINGLE_MODE = "Single diameter"
 SWEEP_MODE = "Diameter sweep"
 
@@ -330,6 +331,33 @@ def _refresh_preview(state, mode, diameter, d_min, d_max, d_steps):
     return _draw_guides(state["base"], state["scale"], diameters), caption
 
 
+def _probe_backend() -> dict:
+    """Ask the worker what it is, so the UI can lay out its controls.
+
+    Cheap and image-free. Any failure - no key, cold endpoint, or a worker
+    predating the probe - falls back to a label rather than raising: the UI
+    must still come up, and every mode still works without this.
+    """
+    try:
+        if LOCAL_INFERENCE:
+            out = _invoke_local({"probe": True})
+        else:
+            if not (RUNPOD_API_KEY and RUNPOD_ENDPOINT_ID):
+                return {"name": "(not configured)"}
+            r = requests.post(f"{RUNPOD_BASE}/runsync",
+                              json={"input": {"probe": True}},
+                              headers=AUTH_HEADER, timeout=30)
+            r.raise_for_status()
+            out = (r.json() or {}).get("output") or {}
+        backend = out.get("backend") or {}
+        if backend.get("name"):
+            return backend
+        logger.warning("Probe returned no backend field: %s", out)
+    except Exception as e:
+        logger.warning("Backend probe failed (%s); continuing without it.", e)
+    return {"name": "(unknown)"}
+
+
 def _config_error() -> str | None:
     if LOCAL_INFERENCE:
         return None
@@ -366,6 +394,30 @@ def _sweep_diameters(dmin, dmax, steps):
     return sorted({round(dmin + i * gap) for i in range(steps)})
 
 
+_SEVERITY_MARK = {"error": "🛑", "warn": "⚠️", "info": "ℹ️"}
+
+
+def _flags_md(output) -> str:
+    """Render the worker's quality flags, or fall back for an older worker."""
+    flags = output.get("quality_flags")
+    if flags is None:
+        warning = output.get("confluency_warning")
+        return f"> ⚠️ {warning}\n\n" if warning else ""
+    lines = [f"> {_SEVERITY_MARK.get(f['severity'], '⚠️')} {f['message']}"
+             for f in flags if f["severity"] in ("warn", "error")]
+    return ("\n>\n".join(lines) + "\n\n") if lines else ""
+
+
+def _flag_summary(output) -> str:
+    """Short tail for the status line, so triage needs no scrolling."""
+    flags = output.get("quality_flags") or []
+    n_err = sum(f["severity"] == "error" for f in flags)
+    n_warn = sum(f["severity"] == "warn" for f in flags)
+    parts = ([f"{n_err} error{'s' * (n_err != 1)}"] if n_err else []) + \
+            ([f"{n_warn} warning{'s' * (n_warn != 1)}"] if n_warn else [])
+    return " — " + ", ".join(parts) if parts else ""
+
+
 def _error(msg):
     """Uniform error tuple across every output slot."""
     return (None, None, None, msg, msg, None, None, None, None)
@@ -398,12 +450,11 @@ def _render_sweep(output, cell_line, elapsed):
     line_tag = output.get("cell_line") or (
         cell_line if cell_line and cell_line != "(Not specified)" else "—"
     )
-    warning = output.get("confluency_warning")
     best = max(sweep, key=lambda e: e["cell_count"])
     closest = max(sweep, key=lambda e: e["mask_coverage"])
     stats_md = (
         "### Sweep\n\n"
-        + (f"> ⚠️ {warning}\n\n" if warning else "")
+        + _flags_md(output)
         + f"**Cell Line:** {line_tag}\n\n"
         f"**Confluency (whole image):** {confluency:.2f}%\n\n"
         f"**Diameters tried:** {len(sweep)} "
@@ -420,7 +471,7 @@ def _render_sweep(output, cell_line, elapsed):
         "Cellpose is missing. Highest cell count is not automatically right; "
         "compare the masks against the cells you can see._"
     )
-    status = f"Swept {len(sweep)} diameters in {elapsed}s"
+    status = f"Swept {len(sweep)} diameters in {elapsed}s" + _flag_summary(output)
     return norm, None, hist, stats_md, status, plot, gallery, table, overlay
 
 
@@ -441,20 +492,35 @@ def _render_output(output, cell_line, elapsed):
     line_tag = output.get("cell_line") or (
         cell_line if cell_line and cell_line != "(Not specified)" else "—"
     )
-    warning = output.get("confluency_warning")
+    trace = output.get("auto_diameter_trace")
+
+    chosen_md = ""
+    plot = table = None
+    if trace:
+        chosen_md = (
+            f"**Diameter (chosen automatically):** "
+            f"{output['auto_diameter']:g} px — picked from {len(trace)} tried\n\n"
+        )
+        plot = _b64_to_image(output["sweep_plot_b64"])
+        table = [[e["diameter"], e["cell_count"], round(e["mask_coverage"], 2)]
+                 for e in trace]
+
     stats_md = (
         "### Statistics\n\n"
-        + (f"> ⚠️ {warning}\n\n" if warning else "")
+        + _flags_md(output)
         + f"**Cell Line:** {line_tag}\n\n"
-        f"**Cell Count:** {output['cell_count']}\n\n"
+        + chosen_md
+        + f"**Cell Count:** {output['cell_count']}\n\n"
         f"**Confluency:** {output['confluency']:.2f}%\n\n"
         f"**Area captured by masks:** {output.get('mask_coverage', float('nan')):.2f}%\n\n"
         f"**Min Intensity:** {output['min_intensity']}\n\n"
         f"**Max Intensity:** {output['max_intensity']}\n\n"
         f"**Processing Time:** {elapsed} s"
     )
-    return (norm, mask, hist, stats_md, f"Complete in {elapsed}s",
-            None, None, None, overlay)
+    status = (f"Complete in {elapsed}s"
+              + (f" — chose {output['auto_diameter']:g} px" if trace else "")
+              + _flag_summary(output))
+    return (norm, mask, hist, stats_md, status, plot, None, table, overlay)
 
 
 def _invoke_local(job_input):
@@ -483,6 +549,7 @@ def invoke_runpod(image, mode, diameter, d_min, d_max, d_steps,
         return _error("Please upload an image first.")
 
     sweeping = mode == SWEEP_MODE
+    automatic = mode == AUTO_MODE
 
     try:
         job_input = {
@@ -493,7 +560,11 @@ def invoke_runpod(image, mode, diameter, d_min, d_max, d_steps,
             "cell_line": cell_line if cell_line and cell_line != "(Not specified)" else None,
         }
 
-        if sweeping:
+        if automatic:
+            # The worker scans diameters itself and keeps the one whose masks
+            # best reproduce the independently measured confluency.
+            job_input["auto_diameter"] = True
+        elif sweeping:
             diameters = _sweep_diameters(d_min, d_max, d_steps)
             if len(diameters) > MAX_SWEEP_POINTS:
                 return _error(
@@ -556,6 +627,12 @@ def invoke_runpod(image, mode, diameter, d_min, d_max, d_steps,
         return _error(f"Error: {e}")
 
 
+# Resolved once at import: the Blocks below are laid out differently depending
+# on what the worker is, so this has to happen before they are built.
+BACKEND = _probe_backend()
+logger.info("Backend: %s", BACKEND)
+
+
 # ----------------- Gradio UI -----------------
 
 with gr.Blocks(title="Fibroblast Detection") as demo:
@@ -582,12 +659,15 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
                 info="Selecting a line tags the result with donor metadata (for future age-prediction modeling).",
             )
             mode_radio = gr.Radio(
-                choices=[SINGLE_MODE, SWEEP_MODE],
-                value=SINGLE_MODE,
+                choices=[AUTO_MODE, SINGLE_MODE, SWEEP_MODE],
+                value=AUTO_MODE,
                 label="Diameter mode",
-                info="Sweep segments the image once per diameter and compares them.",
+                info="Automatic scans diameters on the worker and keeps the one "
+                     "whose masks best match the measured confluency — nothing "
+                     "to set. Single uses the diameter you pick; Sweep shows "
+                     "every diameter so you can judge them yourself.",
             )
-            with gr.Group() as single_controls:
+            with gr.Group(visible=False) as single_controls:
                 diameter_slider = gr.Slider(
                     minimum=5, maximum=200, step=1, value=30,
                     label="Approx. Cell Diameter (px)",
@@ -616,8 +696,9 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
             preview_image = gr.Image(
                 label="Upload preview with diameter guide",
                 interactive=False,
+                visible=False,
             )
-            preview_caption = gr.Markdown()
+            preview_caption = gr.Markdown(visible=False)
 
             sensitivity_slider = gr.Slider(
                 minimum=0.3, maximum=1.5, step=0.05, value=1.0,
@@ -630,11 +711,13 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
             denoise_checkbox = gr.Checkbox(label="Apply Denoising")
             blur_checkbox = gr.Checkbox(label="Apply Gaussian Blur")
             run_btn = gr.Button("Run Detection", variant="primary")
-            if LOCAL_INFERENCE:
-                gr.Markdown("**Backend:** `local (in-process cellpose)`")
-            else:
-                endpoint_label = RUNPOD_ENDPOINT_ID or "(not configured)"
-                gr.Markdown(f"**RunPod endpoint:** `{endpoint_label}`")
+            transport = ("local (in-process)" if LOCAL_INFERENCE
+                         else f"RunPod {RUNPOD_ENDPOINT_ID or '(not configured)'}")
+            gr.Markdown(
+                f"**Backend:** `{BACKEND.get('name', '(unknown)')}`"
+                + (f" on `{BACKEND['device']}`" if BACKEND.get("device") else "")
+                + f"<br>**Transport:** `{transport}`"
+            )
 
         with gr.Column():
             status_output = gr.Textbox(
@@ -670,16 +753,27 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
             output3 = gr.Image(label="Intensity Histogram", interactive=False)
 
     def _toggle_mode(mode):
-        """Show the controls and result panels for the selected mode."""
-        sweeping = mode == SWEEP_MODE
-        show_single = gr.update(visible=not sweeping)
-        show_sweep = gr.update(visible=sweeping)
-        return show_single, show_sweep, show_single, show_sweep
+        """Show the controls and result panels for the selected mode.
+
+        Automatic borrows the sweep's plot and table to show the diameters it
+        tried, but has no per-diameter gallery and no diameter to set.
+        """
+        automatic, sweeping = mode == AUTO_MODE, mode == SWEEP_MODE
+        return (
+            gr.update(visible=mode == SINGLE_MODE),   # single_controls
+            gr.update(visible=sweeping),              # sweep_controls
+            gr.update(visible=not sweeping),          # single_results (the mask)
+            gr.update(visible=sweeping or automatic), # sweep_results panel
+            gr.update(visible=sweeping),              # per-diameter gallery
+            gr.update(visible=not automatic),         # diameter guide preview
+            gr.update(visible=not automatic),         # its caption
+        )
 
     mode_radio.change(
         fn=_toggle_mode,
         inputs=[mode_radio],
-        outputs=[single_controls, sweep_controls, single_results, sweep_results],
+        outputs=[single_controls, sweep_controls, single_results, sweep_results,
+                 sweep_gallery, preview_image, preview_caption],
     )
 
     def _preview_sweep(d_min, d_max, steps):

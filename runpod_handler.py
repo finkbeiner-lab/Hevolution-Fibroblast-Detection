@@ -126,8 +126,40 @@ try:
 except Exception:
     _GPU_AVAILABLE = False
 
+import cellpose
 from cellpose import models
 import runpod
+
+# ----------------- Which cellpose is installed -----------------
+#
+# Cellpose 3 and 4 cannot coexist (same package), so the backend is whichever
+# env this process was started in. They differ in three ways that matter here:
+#
+#   * v3 exposes models.Cellpose; v4 renamed it to models.CellposeModel and
+#     dropped the old name entirely.
+#   * v3 Cellpose.eval returns (masks, flows, styles, diams) - four values;
+#     v4 CellposeModel.eval returns three.
+#   * v3 needs channels=[0, 0] to read a 2-D array as a single grayscale
+#     channel. v4's cpsam has no such 2-channel contract and defaults to
+#     channels=None, which takes the array as given.
+#
+# Measured on the saved runs, BOTH backends depend strongly on the diameter:
+# cellpose-SAM at diameter=None is its own worst setting on every image tried,
+# and two of three collapse to zero cells at diameter=180. "Cellpose-SAM needs
+# no diameter" is not true on 10x phase contrast, which is why the automatic
+# diameter search below exists rather than a diameter-free call.
+_CELLPOSE_VERSION = str(cellpose.version)
+_CELLPOSE_MAJOR = int(_CELLPOSE_VERSION.split(".")[0])
+_HAS_V3_API = hasattr(models, "Cellpose")
+
+# Version string and API surface must agree; a half-upgraded env is worth
+# crashing on rather than guessing about.
+if (_CELLPOSE_MAJOR < 4) != _HAS_V3_API:
+    raise RuntimeError(
+        f"cellpose {_CELLPOSE_VERSION} reports major {_CELLPOSE_MAJOR}, but "
+        f"models.Cellpose is {'present' if _HAS_V3_API else 'missing'}. "
+        "This environment is inconsistent; reinstall cellpose."
+    )
 
 # ----------------- Persistent storage (RunPod Network Volume) -----------------
 #
@@ -194,8 +226,36 @@ else:
 
 _DEVICE_NAME = str(_DEVICE_KWARGS.get("device", "cuda" if _GPU_AVAILABLE else "cpu"))
 print(f"[startup] Accelerator: {_DEVICE_NAME}")
-MODEL = models.Cellpose(gpu=_GPU_AVAILABLE, model_type="cyto3", **_DEVICE_KWARGS)
-print("[startup] Cellpose 'cyto3' loaded")
+
+if _CELLPOSE_MAJOR >= 4:
+    MODEL_NAME = os.environ.get("CELLPOSE_MODEL", "cpsam_v2")
+    MODEL = models.CellposeModel(
+        gpu=_GPU_AVAILABLE, pretrained_model=MODEL_NAME, **_DEVICE_KWARGS
+    )
+    _EVAL_KWARGS: dict = {}
+else:
+    MODEL_NAME = os.environ.get("CELLPOSE_MODEL", "cyto3")
+    MODEL = models.Cellpose(
+        gpu=_GPU_AVAILABLE, model_type=MODEL_NAME, **_DEVICE_KWARGS
+    )
+    _EVAL_KWARGS = {"channels": [0, 0]}
+
+BACKEND = {
+    "name": f"cellpose-{_CELLPOSE_VERSION}/{MODEL_NAME}",
+    "cellpose_version": _CELLPOSE_VERSION,
+    "model": MODEL_NAME,
+    "device": _DEVICE_NAME,
+}
+print(f"[startup] Cellpose {_CELLPOSE_VERSION!r} model {MODEL_NAME!r} loaded")
+
+
+def _segment(norm_gray: np.ndarray, diameter: float | None) -> np.ndarray:
+    """Instance labels for a 2-D uint8 image. The only caller of MODEL.eval.
+
+    Hides the v3/v4 differences described above so nothing else in this file
+    has to know which cellpose is installed.
+    """
+    return MODEL.eval(norm_gray, diameter=diameter, **_EVAL_KWARGS)[0]
 
 
 # ----------------- Helpers -----------------
@@ -343,6 +403,87 @@ def _foreground_mask(
     return binary > 0
 
 
+# Quality-flag thresholds. Like CONFLUENCY_TEXTURE_THRESHOLD these are
+# calibration constants, not universal truths.
+#
+# MASK_GAP_*: confluency and mask coverage measure the same field two
+# independent ways, so a large gap means the segmentation missed cells rather
+# than that the plate was empty. The docstring above records a HEALTHY 10x run
+# at 15% masks against 39% measured coverage - a ratio of 0.38. A measured
+# failure on a confluent monolayer sits at 0.5% against 99%, a ratio of 0.005.
+# Those are ~75x apart, so 0.30/0.10 falls in the gap without firing on a good
+# run. Only evaluated above MASK_GAP_MIN_CONFLUENCY, below which the ratio is
+# noise.
+MASK_GAP_WARN = 0.30
+MASK_GAP_ERROR = 0.10
+MASK_GAP_MIN_CONFLUENCY = 10.0
+
+# Below this there is nothing on the plate to measure.
+EMPTY_FIELD_CONFLUENCY = 2.0
+
+# UNCALIBRATED. Clipped pixels destroy both the local-SD texture the
+# confluency reads and the gradients Cellpose reads, but not one of the 25
+# saved runs clips a single pixel, so this threshold has never fired against
+# real data. Warn-only, and worth re-checking against an over-exposed plate
+# before it is trusted.
+CLIPPED_FRACTION = 0.01
+
+
+def _clipping(gray: np.ndarray) -> tuple:
+    """Fraction of pixels pinned at the bottom and top of the sensor range."""
+    if np.issubdtype(gray.dtype, np.integer):
+        full = float(np.iinfo(gray.dtype).max)
+    else:
+        full = float(max(np.max(gray), 1.0))
+    return float((gray <= 0).mean()), float((gray >= full).mean())
+
+
+def _quality_flags(*, confluency, contrast, clip_lo, clip_hi,
+                   mask_coverage=None, cell_count=None, context="") -> list:
+    """Machine-readable reasons not to trust this result.
+
+    Everything here is derived from numbers the handler already computed, so
+    the flags cost nothing beyond the comparisons themselves.
+    """
+    flags = []
+
+    def add(code, severity, message):
+        flags.append({"code": code, "severity": severity, "message": message})
+
+    if contrast < LOW_CONTRAST_FRACTION:
+        add("low_contrast", "warn",
+            f"Low image contrast ({contrast * 100:.1f}% of full scale). "
+            "Normalization amplifies noise in a nearly empty field, so "
+            "confluency can read high on bare surface. Check the overlay.")
+
+    if clip_lo > CLIPPED_FRACTION or clip_hi > CLIPPED_FRACTION:
+        add("clipped", "warn",
+            f"{max(clip_lo, clip_hi) * 100:.1f}% of pixels are clipped "
+            f"({clip_lo * 100:.1f}% black, {clip_hi * 100:.1f}% white). "
+            "Both the texture measurement and the segmentation degrade on "
+            "clipped data; consider re-imaging with a different exposure.")
+
+    if confluency < EMPTY_FIELD_CONFLUENCY:
+        add("empty_field", "warn",
+            f"The field measures {confluency:.1f}% covered - essentially "
+            "empty. Cell counts from it are not meaningful.")
+    elif cell_count == 0:
+        add("no_cells", "error",
+            f"No cells were segmented, but the field measures "
+            f"{confluency:.1f}% covered. That is a segmentation failure, "
+            "not an empty well.")
+    elif mask_coverage is not None and confluency >= MASK_GAP_MIN_CONFLUENCY:
+        ratio = mask_coverage / confluency
+        if ratio < MASK_GAP_WARN:
+            add("masks_missed_cells",
+                "error" if ratio < MASK_GAP_ERROR else "warn",
+                f"Masks captured {mask_coverage:.1f}% of the field{context}, "
+                f"but the image measures {confluency:.1f}% covered - only "
+                f"{ratio * 100:.0f}% of it. The segmentation is missing most "
+                "of the cells that are there.")
+    return flags
+
+
 def _raw_contrast(gray: np.ndarray, pct: tuple | None = None) -> float:
     """p1..p99 spread of the ORIGINAL pixels, as a fraction of full scale."""
     if np.issubdtype(gray.dtype, np.integer):
@@ -351,6 +492,86 @@ def _raw_contrast(gray: np.ndarray, pct: tuple | None = None) -> float:
         full = float(max(np.max(gray), 1.0))
     p1, p99 = np.percentile(gray, (1, 99)) if pct is None else pct
     return float(p99 - p1) / max(full, 1e-9)
+
+
+# Diameters tried by the automatic search, in pixels. Cellpose rescales the
+# image so this value maps to its training size, so it is a scale knob, not a
+# measurement - the best value is often nowhere near the true cell size (on a
+# saved confluent field with ~25-30 px cells, the best setting was 90 px).
+# That is why the search is a scan and not an estimate.
+#
+# Coarse-to-fine: this grid, then one refinement pass either side of the
+# winner. Cellpose is FASTER at large diameters - it downscales more - so a
+# scan costs much less than the point count suggests.
+AUTO_DIAMETER_GRID = (30, 60, 90, 120, 150, 180)
+AUTO_REFINE_STEPS = 2
+
+# Hard bounds for refinement. On one saved image the best diameter is the
+# largest one tried, so without a ceiling the refinement walks off the end of
+# the grid chasing a still-improving score. 200 matches the UI slider's range.
+AUTO_DIAMETER_MIN = 15.0
+AUTO_DIAMETER_MAX = 200.0
+
+
+def _score_diameter(mask_coverage: float, confluency: float) -> float:
+    """Lower is better: how far this diameter's masks are from the coverage
+    the image itself reports.
+
+    Confluency is measured from texture and never touches Cellpose, so it is
+    an INDEPENDENT estimate of how much of the field is cells. The diameter
+    whose instance masks best reproduce it is the one to keep. Maximising
+    coverage alone would instead reward a diameter that floods the field with
+    spurious masks.
+    """
+    return abs(mask_coverage - confluency)
+
+
+def _auto_diameter(norm_gray: np.ndarray, confluency: float):
+    """Search for the best diameter. Returns (chosen, trace).
+
+    `trace` is one entry per diameter tried, in the same shape the manual
+    sweep produces, so it renders through the existing sweep plot.
+    """
+    tried: dict[float, dict] = {}
+
+    def evaluate(d: float) -> dict:
+        d = float(round(d))
+        if d not in tried:
+            masks = _segment(norm_gray, d)
+            tried[d] = {
+                "diameter": d,
+                "cell_count": int((np.unique(masks) != 0).sum()),
+                "mask_coverage": _coverage_percent(masks),
+            }
+            tried[d]["score"] = _score_diameter(tried[d]["mask_coverage"], confluency)
+        return tried[d]
+
+    grid = sorted(AUTO_DIAMETER_GRID)
+    for d in grid:
+        evaluate(d)
+
+    def clamp(d):
+        return min(max(d, AUTO_DIAMETER_MIN), AUTO_DIAMETER_MAX)
+
+    # Refine around the winner. A diameter that finds nothing is a real
+    # failure mode (two saved images collapse to zero cells at 180 px), so
+    # candidates with no cells are never chosen while any candidate has some.
+    def best_of(entries):
+        scored = [e for e in entries if e["cell_count"] > 0] or list(entries)
+        return min(scored, key=lambda e: e["score"])
+
+    best = best_of(tried.values())
+    step = (grid[1] - grid[0]) / 2.0
+    for _ in range(AUTO_REFINE_STEPS):
+        for d in (clamp(best["diameter"] - step), clamp(best["diameter"] + step)):
+            evaluate(d)
+        best = best_of(tried.values())
+        step /= 2.0
+        if step < 4:
+            break
+
+    trace = [tried[d] for d in sorted(tried)]
+    return best["diameter"], trace
 
 
 def _coverage_percent(mask: np.ndarray) -> float:
@@ -548,9 +769,17 @@ def handler(job):
     try:
         job_input = job.get("input") or {}
 
+        # Capabilities probe: lets the UI lay out its controls before any
+        # image exists. Answered before anything expensive happens.
+        if job_input.get("probe"):
+            return {"backend": BACKEND, "gpu": _GPU_AVAILABLE,
+                    "auto_diameter_grid": list(AUTO_DIAMETER_GRID)}
+
         image_b64 = job_input.get("image_b64")
         if not image_b64:
             return {"error": "Missing required field 'image_b64' in input."}
+
+        auto_diameter = bool(job_input.get("auto_diameter", False))
 
         diameter = job_input.get("diameter")
         if diameter is not None:
@@ -619,13 +848,18 @@ def handler(job):
         confluency = _coverage_percent(foreground)
 
         contrast = _raw_contrast(gray, pct=raw_pct)
-        confluency_warning = None
-        if contrast < LOW_CONTRAST_FRACTION:
-            confluency_warning = (
-                f"Low image contrast ({contrast * 100:.1f}% of full scale). "
-                f"Normalization amplifies noise in a nearly empty field, so "
-                f"confluency can read high on bare surface. Check the overlay."
-            )
+        clip_lo, clip_hi = _clipping(gray)
+
+        def quality_flags(**kw):
+            return _quality_flags(confluency=confluency, contrast=contrast,
+                                  clip_lo=clip_lo, clip_hi=clip_hi, **kw)
+
+        # Kept alongside the structured list: an older UI deployed against a
+        # newer worker still reads this field.
+        confluency_warning = next(
+            (f["message"] for f in quality_flags() if f["code"] == "low_contrast"),
+            None,
+        )
 
         norm_img = _render_norm(norm_gray)
         hist_img = _render_hist(norm_gray)
@@ -642,6 +876,9 @@ def handler(job):
             "blur": blur,
             "cell_line": cell_line,
             "confluency_sensitivity": sensitivity,
+            # Two backends produce different masks from the same image, so a
+            # run is only comparable with another that names the same one.
+            "backend": BACKEND["name"],
             # Recorded so runs measured with the old Otsu rule are never
             # silently compared against these.
             "confluency_method": (
@@ -659,9 +896,7 @@ def handler(job):
         if diameters:
             sweep = []
             for d in diameters:
-                masks, _flows, _styles, _diams = MODEL.eval(
-                    norm_gray, diameter=d, channels=[0, 0]
-                )
+                masks = _segment(norm_gray, d)
                 labels = np.unique(masks)
                 entry = {
                     "diameter": d,
@@ -676,9 +911,16 @@ def handler(job):
             plot_img = _render_sweep_plot(sweep, confluency=confluency)
             images["sweep_plot.png"] = plot_img
 
+            best = max(sweep, key=lambda e: e["mask_coverage"])
+            flags = quality_flags(
+                mask_coverage=best["mask_coverage"],
+                cell_count=best["cell_count"],
+                context=f" at its best diameter ({best['diameter']:g} px)",
+            )
             stats = {
                 "confluency": confluency,
                 "confluency_warning": confluency_warning,
+                "quality_flags": flags,
                 "sweep": [
                     {k: v for k, v in e.items() if k != "mask_b64"} for e in sweep
                 ],
@@ -693,21 +935,32 @@ def handler(job):
                 "sweep": sweep,
                 "confluency": confluency,
                 "confluency_warning": confluency_warning,
+                "quality_flags": flags,
                 "sweep_plot_b64": _pil_to_b64(plot_img),
                 "normalized_b64": _photo_b64(norm_img),
                 "histogram_b64": _pil_to_b64(hist_img),
                 "confluency_overlay_b64": _photo_b64(overlay_img),
                 "min_intensity": min_intensity,
                 "max_intensity": max_intensity,
+                "backend": BACKEND,
                 "cell_line": cell_line,
             }
             if persist_path:
                 response["persist_path"] = persist_path
             return response
 
-        masks, _flows, _styles, _diams = MODEL.eval(
-            norm_gray, diameter=diameter, channels=[0, 0]
-        )
+        auto_trace = None
+        if auto_diameter:
+            diameter, auto_trace = _auto_diameter(norm_gray, confluency)
+            params["diameter"] = diameter
+            params["auto_diameter"] = True
+            # Re-segment at the winner rather than caching a label image per
+            # candidate; one extra pass costs far less than holding ten
+            # full-size label arrays.
+            plot_img = _render_sweep_plot(auto_trace, confluency=confluency)
+            images["auto_diameter_plot.png"] = plot_img
+
+        masks = _segment(norm_gray, diameter)
 
         labels = np.unique(masks)
         mask_img = _render_mask(masks)
@@ -721,6 +974,15 @@ def handler(job):
             "min_intensity": min_intensity,
             "max_intensity": max_intensity,
         }
+        stats["quality_flags"] = quality_flags(
+            mask_coverage=stats["mask_coverage"],
+            cell_count=stats["cell_count"],
+            context=(f" at the {diameter:g} px diameter it chose"
+                     if auto_trace is not None else ""),
+        )
+        if auto_trace is not None:
+            stats["diameter"] = diameter
+            stats["auto_diameter_trace"] = auto_trace
 
         persist_path = _persist_job_artifacts(
             job_id=job_id, input_pil=pil, images=images,
@@ -729,12 +991,17 @@ def handler(job):
 
         response = {
             **stats,
+            "backend": BACKEND,
             "cell_line": cell_line,
             "normalized_b64": _photo_b64(norm_img),
             "mask_b64": _pil_to_b64(mask_img),
             "histogram_b64": _pil_to_b64(hist_img),
             "confluency_overlay_b64": _photo_b64(overlay_img),
         }
+        if auto_trace is not None:
+            response["auto_diameter"] = diameter
+            response["auto_diameter_trace"] = auto_trace
+            response["sweep_plot_b64"] = _pil_to_b64(plot_img)
         if persist_path:
             response["persist_path"] = persist_path
         return response

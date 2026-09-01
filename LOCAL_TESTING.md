@@ -55,7 +55,69 @@ The first click is slow (~30–60 s): cellpose downloads the `cyto3` weights
 (~25 MB) and loads the model. Every click after that reuses the loaded model,
 exactly like a warm RunPod worker.
 
-### Sizing the diameter before you run
+### Automatic diameter (default)
+
+**Diameter mode → Automatic** sets no diameter at all. The worker scans a grid
+of diameters (30–180 px, then refines around the winner, ~10 segmentations)
+and keeps the one whose instance masks best reproduce the confluency measured
+from image texture.
+
+Confluency never touches Cellpose, so it is an *independent* estimate of how
+much of the field is cells. The diameter whose masks come closest to it is the
+one to keep. Maximising mask coverage alone would instead reward a diameter
+that floods the field with spurious masks — the two rules agree on 7 of the 8
+saved images anyway, and where they differ the agreement rule is the safer one.
+
+The plot and table below the result show every diameter tried, so the choice is
+auditable rather than magic. Validation on a dense monolayer: the search picked
+30 px and captured 32.4%, against 32.5% for the hand-tuned best — it reproduces
+the manual optimum without being told.
+
+Cost is the catch: ~10 segmentations instead of one. Larger diameters are
+cheaper (Cellpose downscales more), so it is not 10x — measured 21–130 s on
+Apple MPS, and far less on a RunPod GPU. Use **Single diameter** when you
+already know the value.
+
+### Which model: cyto3 or Cellpose-SAM
+
+The worker adapts to whichever cellpose is installed — `models.Cellpose` +
+`cyto3` on v3, `models.CellposeModel` + `cpsam_v2` on v4 — behind one
+`_segment()` seam. Two conda envs, because cellpose 3 and 4 cannot coexist:
+
+```bash
+./run_local.sh                     # fibroblast-local  -> cellpose 3 / cyto3
+FIBRO_ENV=fibroblast-sam ./run_local.sh   # cellpose 4 / Cellpose-SAM
+```
+
+Measured in automatic mode on the saved runs (confluency is identical under
+both, as it must be — it is a texture measurement independent of the model):
+
+| image | confluency | cyto3 | Cellpose-SAM |
+|---|---|---|---|
+| confluent swirl | 99.2% | d=30, 206 cells, 3.6% | d=90, 418 cells, **9.3%** |
+| dense monolayer | 99.9% | d=30, 1380 cells, **32.4%** | d=128, 848 cells, 30.5% |
+| sparse spindly | 30.9% | d=188, 40 cells, 16.0% | d=195, 119 cells, **31.4%** |
+| mid density | 55.4% | d=90, 82 cells, 17.8% | d=45, 770 cells, **40.0%** |
+
+Cellpose-SAM wins on three of four, decisively on the sparse and mid-density
+fields; cyto3 edges it on the dense monolayer.
+
+> **Cellpose-SAM is not diameter-free**, despite being SAM-based. Measured: at
+> `diameter=None` it is its own *worst* setting on every image tried (6.7% vs
+> 34.1% on the sparse field), and two of eight images collapse to **zero
+> cells** at 180 px. The `diameter` argument survives in v4 as the rescale
+> factor; what it lost is v3's size model to guess it. That is the whole reason
+> the automatic search exists rather than a plain diameter-free call.
+>
+> The best diameter is also *not* the cell size — on a confluent field of
+> ~25–30 px cells the best setting was 90 px. It is a scale knob, so it has to
+> be searched, not estimated.
+
+**Neither model solves the confluent monolayer.** 9.3% captured on a field that
+measures 99.2% covered is a large improvement on cyto3's 3.6%, but it is not a
+working result. That case is still open.
+
+### Sizing the diameter by hand
 
 The upload panel shows a **preview with a diameter guide**: the image, contrast
 stretched the same way the worker normalizes it, with a yellow ring drawn at
@@ -167,6 +229,31 @@ at the overlay, not as a verdict.
 
 Confluency is a property of the image, so it does not change with diameter and
 is not swept.
+
+### Quality flags
+
+Every run returns `quality_flags` — machine-readable reasons not to trust the
+result — rendered above the statistics and summarised in the status line. They
+cost nothing: all of them come from numbers the worker already computed.
+
+| code | fires when | severity |
+|---|---|---|
+| `masks_missed_cells` | mask coverage is under 30% of measured confluency (10% → error) | warn / error |
+| `no_cells` | nothing segmented on a field that is not empty | error |
+| `empty_field` | confluency under 2% | warn |
+| `low_contrast` | raw contrast under 10% of full scale | warn |
+| `clipped` | over 1% of pixels pinned at black or white | warn |
+
+`masks_missed_cells` is the one that matters: it is what makes the confluent
+monolayer failure announce itself instead of quietly returning 206 cells. Its
+thresholds sit in a wide gap — a healthy 10x run measured a ratio of 0.38,
+the confluent failure 0.005, ~75x apart.
+
+`clipped` is **uncalibrated**: not one of the 25 saved runs clips a single
+pixel, so its 1% threshold has never fired against real data. It is warn-only.
+
+`confluency_warning` is still populated for older UIs; new ones prefer the
+structured list.
 
 ### Speed
 

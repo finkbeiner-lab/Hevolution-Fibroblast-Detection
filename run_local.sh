@@ -29,7 +29,8 @@ ERROR: conda env '$ENV_NAME' does not exist. Create it once with:
 
     conda create -n $ENV_NAME python=3.11 -y
     conda activate $ENV_NAME
-    pip install -r requirements-local.txt
+    pip install -r requirements-local.txt      # cellpose 3 / cyto3
+    #   ...or requirements-sam.txt              # cellpose 4 / Cellpose-SAM
 
 See LOCAL_TESTING.md.
 MSG
@@ -37,21 +38,27 @@ MSG
     fi
 fi
 
-# The worker uses the cellpose 3.x API. Fail loudly and early rather than
-# halfway through a click in the browser.
+# The worker runs on either cellpose 3 (models.Cellpose + cyto3) or cellpose 4
+# (models.CellposeModel + Cellpose-SAM) and adapts to whichever is installed.
+# Fail early only on an inconsistent env, rather than halfway through a click.
 python - <<'PYCHK' || exit 1
 import sys
 try:
+    import cellpose
     from cellpose import models
 except ImportError:
-    sys.exit("ERROR: cellpose is not installed. pip install -r requirements-local.txt")
-if not hasattr(models, "Cellpose"):
-    from importlib.metadata import version
-    sys.exit(
-        f"ERROR: cellpose {version('cellpose')} is active, but the worker needs the\n"
-        "3.x API (models.Cellpose). Cellpose 4 renamed it and ships a different\n"
-        "model. Fix with:  pip install 'cellpose>=3,<4'"
-    )
+    sys.exit("ERROR: cellpose is not installed. Install requirements-local.txt "
+             "(cellpose 3) or requirements-sam.txt (cellpose 4).")
+
+version = str(cellpose.version)
+major = int(version.split(".")[0])
+has_v3 = hasattr(models, "Cellpose")
+if (major < 4) != has_v3:
+    sys.exit(f"ERROR: cellpose {version} reports major {major}, but models.Cellpose "
+             f"is {'present' if has_v3 else 'missing'}. This env is inconsistent; "
+             "reinstall cellpose.")
+print(f"Cellpose: {version} -> "
+      + ("cyto3 (diameter-driven)" if has_v3 else "Cellpose-SAM (cpsam)"))
 PYCHK
 
 # Run the worker in-process instead of calling the RunPod REST API.
@@ -73,7 +80,18 @@ export GRADIO_ANALYTICS_ENABLED=False
 
 # Cache cellpose weights next to the repo so a shared/offline machine only
 # ever downloads them once. Pre-seed on an offline node (see LOCAL_TESTING.md).
-export CELLPOSE_LOCAL_MODELS_PATH="${CELLPOSE_LOCAL_MODELS_PATH:-$PWD/.cellpose_models}"
+# The repo-local cache holds cyto3 only. Cellpose-SAM's cpsam_v2 is 1.2 GB and
+# already sits in ~/.cellpose/models, so pointing v4 at the repo cache would
+# re-download it onto a network share. Use the home cache for v4.
+if [[ -z "${CELLPOSE_LOCAL_MODELS_PATH:-}" ]]; then
+    if python -c "from cellpose import models; import sys; \
+                  sys.exit(0 if hasattr(models, 'Cellpose') else 1)" 2>/dev/null; then
+        CELLPOSE_LOCAL_MODELS_PATH="$PWD/.cellpose_models"
+    else
+        CELLPOSE_LOCAL_MODELS_PATH="$HOME/.cellpose/models"
+    fi
+fi
+export CELLPOSE_LOCAL_MODELS_PATH
 mkdir -p "$CELLPOSE_LOCAL_MODELS_PATH"
 
 python - <<'EOF'

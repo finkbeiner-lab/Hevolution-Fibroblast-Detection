@@ -1,0 +1,26 @@
+# Cellpose-SAM (cellpose 4.x) environment: frontend + worker in one env.
+#
+# Mirrors requirements-local.txt, except cellpose is UNPINNED past 4.x. Version
+# 4 renamed models.Cellpose to models.CellposeModel and ships Cellpose-SAM
+# (cpsam_v2), which needs no diameter. runpod_handler.py detects which of the
+# two APIs is installed and adapts, so the same code runs in either env.
+#
+# Cellpose 3 and 4 cannot coexist - same package name - so this gets its own
+# env, kept alongside `fibroblast-local` so the two backends can be compared:
+#
+#   conda create -n fibroblast-sam python=3.11 -y
+#   conda activate fibroblast-sam
+#   pip install -r requirements-sam.txt
+
+# --- worker ---
+torch>=2.2
+cellpose>=4.2,<5
+numpy>=1.26,<3
+Pillow>=9.5
+opencv-python-headless>=4.8
+matplotlib>=3.7
+runpod>=1.6.0
+
+# --- frontend ---
+gradio>=4.0.0
+requests>=2.31.0
