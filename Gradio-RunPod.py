@@ -32,7 +32,7 @@ from pathlib import Path
 import gradio as gr
 import numpy as np
 import requests
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -151,6 +151,185 @@ def _b64_to_image(b64: str) -> Image.Image:
     return Image.open(io.BytesIO(base64.b64decode(b64)))
 
 
+# ----------------- Upload preview -----------------
+# Browsers cannot display TIFF, so an uploaded TIFF shows as an empty box even
+# though the file is perfectly readable - which is why it appears in the
+# Normalized Image and Cell Coverage results but not at the upload control.
+# We therefore render our own 8-bit preview, and draw the diameter Cellpose
+# will be given on top of it so it can be judged against the actual cells
+# before paying for a segmentation.
+
+MAX_PREVIEW_PX = 1200
+GUIDE_COLOR = (255, 214, 0)
+
+# Tried in order; the frontend has no matplotlib, so DejaVu is not guaranteed.
+_FONT_CANDIDATES = (
+    "DejaVuSans.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+)
+
+
+def _font(size: int):
+    for candidate in _FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(size=size)  # Pillow >= 10.1
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def _label(draw, xy, text, font):
+    """Draw text with a dark halo, falling back if the font lacks stroke."""
+    try:
+        draw.text(xy, text, fill=GUIDE_COLOR, font=font,
+                  stroke_width=2, stroke_fill=(0, 0, 0))
+    except (ValueError, TypeError, AttributeError):
+        draw.text(xy, text, fill=GUIDE_COLOR, font=font)
+
+
+def _gray_array(img: Image.Image) -> np.ndarray:
+    """Single-channel array from any PIL image, at its original bit depth."""
+    if img.mode in ("P", "PA"):
+        img = img.convert("RGBA" if img.mode == "PA" else "RGB")
+    arr = np.asarray(img)
+    if arr.ndim == 2:
+        return arr
+    if arr.ndim == 3:
+        if arr.shape[2] >= 3:
+            return arr[:, :, :3].astype("float32").mean(axis=2)
+        return arr[:, :, 0]
+    raise ValueError(f"Unsupported image with shape {arr.shape}")
+
+
+def _preview_base(path: str):
+    """(RGB preview, scale) for an uploaded file.
+
+    Percentile-stretched to 8 bits the same way the worker normalizes, so a
+    16-bit TIFF looks like its "Normalized Image" result instead of the near
+    black rectangle a plain 8-bit conversion produces. `scale` is how much the
+    preview was resized by, so guides drawn on it stay true to the pixel
+    diameters the worker will actually use.
+    """
+    arr = _gray_array(_open_any(path)).astype("float32")
+    p1, p99 = np.percentile(arr, (1, 99))
+    arr = np.clip((arr - p1) / (p99 - p1 + 1e-8), 0, 1)
+    img = Image.fromarray((arr * 255).astype("uint8")).convert("RGB")
+
+    scale = 1.0
+    longest = max(img.size)
+    if longest > MAX_PREVIEW_PX:
+        scale = MAX_PREVIEW_PX / longest
+        img = img.resize(
+            (max(1, round(img.width * scale)), max(1, round(img.height * scale))),
+            Image.LANCZOS,
+        )
+    return img, scale
+
+
+def _draw_guides(base: Image.Image, scale: float, diameters) -> Image.Image:
+    """Draw each diameter as a true-size ring laid out across the image.
+
+    Side by side rather than concentric: a 12-point sweep drawn about one
+    centre is a solid dartboard that hides the cells underneath, which is
+    exactly what the guide is meant to be compared against.
+    """
+    img = base.copy()
+    draw = ImageDraw.Draw(img)
+    line_w = max(2, round(min(img.size) / 400))
+    font_px = max(13, round(min(img.size) / 45))
+    font = _font(font_px)
+
+    def text_w(text):
+        try:
+            return draw.textlength(text, font=font)
+        except Exception:
+            return len(text) * font_px * 0.6
+
+    margin, gap = font_px, max(6, font_px // 2)
+    avail = max(1.0, img.width - 2 * margin)
+
+    # Each ring gets a slot at least as wide as its own label, so labels stay
+    # apart when a sweep packs several small diameters together.
+    slots = [(d, d * scale / 2, max(d * scale, text_w(f"{d:g} px")))
+             for d in sorted(diameters)]
+
+    rows, row, used = [], [], 0.0
+    for slot in slots:
+        need = slot[2] + (gap if row else 0)
+        if row and used + need > avail:
+            rows.append(row)
+            row, used, need = [], 0.0, slot[2]
+        row.append(slot)
+        used += need
+    if row:
+        rows.append(row)
+
+    label_h = font_px + 4
+    heights = [max(2 * r for _, r, _ in r_slots) + label_h for r_slots in rows]
+    y = (img.height - (sum(heights) + gap * (len(rows) - 1))) / 2
+
+    for r_slots, height in zip(rows, heights):
+        row_w = sum(w for _, _, w in r_slots) + gap * (len(r_slots) - 1)
+        x = (img.width - row_w) / 2
+        cy = y + label_h + (height - label_h) / 2
+        for d, r, slot_w in r_slots:
+            cx = x + slot_w / 2
+            draw.ellipse([cx - r, cy - r, cx + r, cy + r],
+                         outline=GUIDE_COLOR, width=line_w)
+            text = f"{d:g} px"
+            _label(draw, (cx - text_w(text) / 2, cy - r - label_h), text, font)
+            x += slot_w + gap
+        y += height + gap
+    return img
+
+
+def _diameters_for(mode, diameter, d_min, d_max, d_steps):
+    """The diameters a run with these settings would use."""
+    if mode == SWEEP_MODE:
+        return _sweep_diameters(d_min, d_max, d_steps)
+    return [round(float(diameter))]
+
+
+def _load_preview(path):
+    """Decode the upload once; slider moves then only redraw the guides."""
+    if not path:
+        return None
+    try:
+        base, scale = _preview_base(path)
+        return {"base": base, "scale": scale, "name": Path(path).name}
+    except Exception as e:
+        logger.exception("Could not render a preview for %s", path)
+        return {"error": str(e)}
+
+
+def _refresh_preview(state, mode, diameter, d_min, d_max, d_steps):
+    diameters = _diameters_for(mode, diameter, d_min, d_max, d_steps)
+    listed = ", ".join(f"{d:g}" for d in diameters)
+
+    if not state:
+        return None, f"Upload an image to size it against the {listed} px guide."
+    if "error" in state:
+        return None, f"Could not render a preview: {state['error']}"
+
+    if mode == SWEEP_MODE:
+        body = (f"Rings show the {len(diameters)} diameters this sweep would "
+                f"try ({listed} px).")
+    else:
+        body = f"Ring shows the {listed} px diameter Cellpose would assume."
+    note = ""
+    if state["scale"] < 1.0:
+        note = (f" Preview is at {state['scale'] * 100:.0f}% of full size; the "
+                "rings are scaled with it.")
+
+    caption = (f"**{state['name']}** — {body} Adjust until a ring matches a "
+               f"typical cell, then run.{note}")
+    return _draw_guides(state["base"], state["scale"], diameters), caption
+
+
 def _config_error() -> str | None:
     if LOCAL_INFERENCE:
         return None
@@ -219,11 +398,13 @@ def _render_sweep(output, cell_line, elapsed):
     line_tag = output.get("cell_line") or (
         cell_line if cell_line and cell_line != "(Not specified)" else "—"
     )
+    warning = output.get("confluency_warning")
     best = max(sweep, key=lambda e: e["cell_count"])
     closest = max(sweep, key=lambda e: e["mask_coverage"])
     stats_md = (
         "### Sweep\n\n"
-        f"**Cell Line:** {line_tag}\n\n"
+        + (f"> ⚠️ {warning}\n\n" if warning else "")
+        + f"**Cell Line:** {line_tag}\n\n"
         f"**Confluency (whole image):** {confluency:.2f}%\n\n"
         f"**Diameters tried:** {len(sweep)} "
         f"({sweep[0]['diameter']:g}–{sweep[-1]['diameter']:g} px)\n\n"
@@ -260,9 +441,11 @@ def _render_output(output, cell_line, elapsed):
     line_tag = output.get("cell_line") or (
         cell_line if cell_line and cell_line != "(Not specified)" else "—"
     )
+    warning = output.get("confluency_warning")
     stats_md = (
         "### Statistics\n\n"
-        f"**Cell Line:** {line_tag}\n\n"
+        + (f"> ⚠️ {warning}\n\n" if warning else "")
+        + f"**Cell Line:** {line_tag}\n\n"
         f"**Cell Count:** {output['cell_count']}\n\n"
         f"**Confluency:** {output['confluency']:.2f}%\n\n"
         f"**Area captured by masks:** {output.get('mask_coverage', float('nan')):.2f}%\n\n"
@@ -381,13 +564,15 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
 
     with gr.Row():
         with gr.Column():
-            # type="filepath" + image_mode=None hands us the file exactly as
-            # uploaded. Gradio's default (image_mode="RGB") converts first,
-            # which destroys 16-bit TIFFs - a 16-bit image converts to solid
-            # white, silently, and segments to nothing.
-            image_input = gr.Image(
+            # gr.File, not gr.Image, for two reasons. It hands the worker
+            # the file exactly as uploaded - gr.Image's default converts to
+            # RGB first, which silently destroys a 16-bit TIFF - and it does
+            # not try to render the upload in the browser, which is what left
+            # TIFFs showing as an empty box. The preview below is ours.
+            # No file_types filter: the worker takes anything PIL can read.
+            image_input = gr.File(
                 type="filepath",
-                image_mode=None,
+                file_count="single",
                 label="Upload Image (JPEG, PNG, TIFF, BMP, WebP, ...)",
             )
             cell_line_dropdown = gr.Dropdown(
@@ -425,12 +610,22 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
                 )
                 sweep_preview = gr.Markdown()
 
+            # Sits with the diameter controls rather than with the upload so
+            # the ring and the slider moving it are visible at the same time.
+            preview_state = gr.State()
+            preview_image = gr.Image(
+                label="Upload preview with diameter guide",
+                interactive=False,
+            )
+            preview_caption = gr.Markdown()
+
             sensitivity_slider = gr.Slider(
-                minimum=0.3, maximum=1.5, step=0.05, value=0.7,
+                minimum=0.3, maximum=1.5, step=0.05, value=1.0,
                 label="Confluency sensitivity",
-                info="Lower counts more of the field as covered. Check the "
-                     "Cell Coverage overlay and adjust until the red matches "
-                     "the cells you see; then keep it fixed across an experiment.",
+                info="Scales the texture threshold; 1.0 is the calibrated "
+                     "value and should be right on 10x phase contrast. Lower "
+                     "counts more of the field as covered. Check the Cell "
+                     "Coverage overlay, then keep it fixed across an experiment.",
             )
             denoise_checkbox = gr.Checkbox(label="Apply Denoising")
             blur_checkbox = gr.Checkbox(label="Apply Gaussian Blur")
@@ -502,6 +697,23 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
             outputs=[sweep_preview],
         )
 
+    _preview_inputs = [preview_state, mode_radio, diameter_slider,
+                       d_min_slider, d_max_slider, d_steps_slider]
+    _preview_outputs = [preview_image, preview_caption]
+
+    # Decode on upload only; every slider move just redraws the cached image.
+    image_input.change(
+        fn=_load_preview, inputs=[image_input], outputs=[preview_state],
+    ).then(
+        fn=_refresh_preview, inputs=_preview_inputs, outputs=_preview_outputs,
+    )
+
+    for control in (mode_radio, diameter_slider,
+                    d_min_slider, d_max_slider, d_steps_slider):
+        control.change(
+            fn=_refresh_preview, inputs=_preview_inputs, outputs=_preview_outputs,
+        )
+
     run_btn.click(
         fn=invoke_runpod,
         inputs=[image_input, mode_radio, diameter_slider,
@@ -516,6 +728,9 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
         fn=_preview_sweep,
         inputs=[d_min_slider, d_max_slider, d_steps_slider],
         outputs=[sweep_preview],
+    )
+    demo.load(
+        fn=_refresh_preview, inputs=_preview_inputs, outputs=_preview_outputs,
     )
 
     gr.Markdown(

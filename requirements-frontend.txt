@@ -3,5 +3,5 @@
 gradio>=4.0.0
 requests>=2.31.0
 Pillow>=9.5.0
-# Only used to rescale 32-bit TIFFs that exceed the request size limit.
+# Rescales oversized TIFFs and builds the upload preview / diameter guide.
 numpy>=1.24

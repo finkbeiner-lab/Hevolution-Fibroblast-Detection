@@ -55,6 +55,20 @@ The first click is slow (~30–60 s): cellpose downloads the `cyto3` weights
 (~25 MB) and loads the model. Every click after that reuses the loaded model,
 exactly like a warm RunPod worker.
 
+### Sizing the diameter before you run
+
+The upload panel shows a **preview with a diameter guide**: the image, contrast
+stretched the same way the worker normalizes it, with a yellow ring drawn at
+the exact pixel diameter Cellpose would be given. Move the slider and the ring
+resizes live — no segmentation runs. Pick the value where a ring covers a
+typical cell and you have a sensible starting diameter before spending any GPU
+time. In sweep mode every diameter in the sweep is drawn, side by side, as a
+size ruler across the image.
+
+Large images are shown scaled down; the rings scale with them, so a ring always
+means the same thing relative to the cells. The caption says the scale factor
+when that happens.
+
 ### Diameter sweep
 
 Cellpose is sensitive to the diameter you give it, and the right value is not
@@ -86,9 +100,13 @@ and downscaled (and the log says so, because pixel diameters scale with it).
 
 Multi-page TIFFs — z-stacks, time series — use the first frame.
 
-> Gradio's image widget converts uploads to 8-bit RGB by default, which turns a
-> 16-bit TIFF into solid white and segments to nothing, with no error. The
-> component is therefore configured with `image_mode=None`; don't remove it.
+> Uploads use `gr.File`, not `gr.Image`, on purpose. `gr.Image` converts to
+> 8-bit RGB by default, which turns a 16-bit TIFF into solid white and segments
+> to nothing with no error; and browsers cannot display TIFF at all, so the
+> widget showed an empty box even when the file was fine — the image appeared
+> in the results but never at the upload control. `gr.File` passes the bytes
+> through untouched, and the diameter-guide preview below it renders a PNG the
+> browser can actually show. Don't swap it back.
 
 ### How confluency is measured
 
@@ -109,15 +127,78 @@ So the app reports two different things:
 The gap between them is how much cell area Cellpose is missing — useful as a
 quality check on the diameter you picked.
 
-**Confluency depends on a threshold, so verify it.** The *Cell Coverage*
-overlay paints in red exactly what was counted. Adjust **Confluency
-sensitivity** (lower = more of the field counted) until the red matches the
-cells you can see, then **keep it fixed** across any experiment whose
-confluency values you intend to compare. The 0.7 default was calibrated on the
-10x Austin-Fibroblasts images and is not a universal constant.
+The texture threshold is **absolute**: a pixel counts as covered when the local
+standard deviation over a 25 px window is at least 26 gray levels of the
+normalized image. Bare surface and covered surface separate cleanly on that
+scale — measured on the saved runs, bare sits at a local SD of ~7–17 and a
+fibroblast monolayer at ~31–63.
+
+> **This changed.** The threshold used to be Otsu's, computed on a min-max
+> rescaled copy of the texture map. Otsu assumes the image contains both
+> classes, but a confluent field has no bare surface, so it split the cell
+> population itself and reported a fraction of a fully covered plate — a saved
+> run of a confluent monolayer scored **32%**, and measures **99%** now. The
+> min-max rescaling made it worse by pinning the scale to the single most
+> extreme speck of debris in the frame. On a ground-truth series (a known
+> fraction of real cell texture composited onto real bare-surface texture) the
+> old rule was **non-monotone** — 57% on an empty field, 21–85% on a fully
+> covered one depending only on where the sensitivity slider sat. The absolute
+> threshold recovers true coverage to within **~2 percentage points** from 0%
+> to 100%. Confluency values from runs before this change are not comparable
+> with values after it; `stats.json` now records `confluency_method` so the two
+> can be told apart.
+
+**Confluency still depends on a threshold, so verify it.** The *Cell Coverage*
+overlay paints in red exactly what was counted. **Confluency sensitivity**
+scales the threshold (lower = more of the field counted); **1.0** is the
+calibrated value and should be right on 10x phase contrast. It is expressed on
+the normalized scale so it is insensitive to exposure, but it does depend on
+magnification. Keep it **fixed** across any experiment whose confluency values
+you intend to compare.
+
+One case the method cannot resolve on its own: an **empty field**. Normalizing
+stretches whatever contrast exists to fill 0–255, so with no cells to set the
+scale, sensor noise gets amplified until bare plastic looks textured and
+confluency reads near 100%. Nothing in a single frame distinguishes that from a
+real signal, so the app warns when the raw contrast is under 10% of full scale
+rather than silently adjusting the number. The margin is thin (the flattest
+bare patch measured 8.6%, real fields 15–35%), so treat it as a prompt to look
+at the overlay, not as a verdict.
 
 Confluency is a property of the image, so it does not change with diameter and
 is not swept.
+
+### Speed
+
+Segmentation dominates; everything else is noise. On a 2048x1536 field:
+
+| | before | now |
+|---|---|---|
+| Single diameter | ~19 s | **~3.5 s** |
+| 5-point sweep | ~95 s | **~11.5 s** |
+
+Two changes got that:
+
+- **Apple Silicon GPU.** Cellpose was falling back to CPU because the device
+  check only looked for CUDA. It now uses Metal (`mps`) when CUDA is absent —
+  ~4x faster locally, with 99.4% pixel agreement against CPU and cell counts
+  within 1%. Set `CELLPOSE_DISABLE_MPS=1` to force CPU if you are reconciling
+  local numbers against a production run.
+- **The image panels no longer go through matplotlib.** They are images, not
+  charts, and matplotlib was rendering a 2048x1536 field into a 400 px
+  thumbnail for ~150–280 ms each. Writing them straight from the array is
+  ~10x faster *and* sharper: panels now come back at up to 1024 px (sweep
+  masks 640 px, since a dozen can travel in one response). The histogram and
+  the sweep chart are still matplotlib, because those really are charts.
+
+The photographic panels ship as JPEG and the masks as PNG, which keeps a
+12-point sweep's response near 1 MB. Artifacts written to the volume stay
+lossless PNG.
+
+A sweep costs one segmentation per diameter, so it scales linearly — but
+larger diameters are *cheaper*, because Cellpose downscales the image to bring
+the given diameter to its training size. A 40–150 px sweep runs faster than a
+25–47 px one.
 
 ### What it writes
 

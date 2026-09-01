@@ -15,9 +15,10 @@ Input JSON (job["input"]):
                       `cell_count` / `confluency` / `mask_b64` fields.
     denoise   : bool  (optional, default false)
     blur      : bool  (optional, default false)
-    confluency_sensitivity : float (optional, default 0.7) threshold multiplier
-                      for the confluency foreground mask. Lower = more of the
-                      field counted as covered. See _foreground_mask().
+    confluency_sensitivity : float (optional, default 1.0) scales the local-SD
+                      threshold for the confluency foreground mask. Lower =
+                      more of the field counted as covered. See
+                      _foreground_mask(); 1.0 is the calibrated value.
     cell_line : str   (optional) GESTALT / Coriell cell line ID (e.g. "AG08498").
                       Persisted into stats.json so downstream analysis can
                       join image -> cell_line -> donor age for model training.
@@ -106,10 +107,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 
+# Extra kwargs for models.Cellpose(). The RunPod path (CUDA, or CPU with no
+# accelerator) passes nothing beyond gpu=, exactly as before; only Apple
+# Silicon needs an explicit device. Set CELLPOSE_DISABLE_MPS=1 to force CPU -
+# MPS kernels are not bit-identical to CPU (measured: 99.4% pixel agreement,
+# cell counts within 1%), which is fine for exploration but worth turning off
+# if you are reconciling local numbers against a production run.
+_DEVICE_KWARGS: dict = {}
 try:
     import torch
 
     _GPU_AVAILABLE = torch.cuda.is_available()
+    if not _GPU_AVAILABLE and not os.environ.get("CELLPOSE_DISABLE_MPS"):
+        _mps = getattr(torch.backends, "mps", None)
+        if _mps is not None and _mps.is_available():
+            _GPU_AVAILABLE = True
+            _DEVICE_KWARGS["device"] = torch.device("mps")
 except Exception:
     _GPU_AVAILABLE = False
 
@@ -128,13 +141,36 @@ import runpod
 # GPU-seconds of work.
 MAX_SWEEP_POINTS = 12
 
-# Threshold multiplier for the confluency foreground mask. 1.0 is plain Otsu,
-# which is conservative on phase contrast: it holds the flat, well-spread cells
-# below threshold. 0.7 was calibrated against the 10x Austin-Fibroblasts set by
-# comparing the overlay with the visible cells. It is a calibration constant,
-# not a universal one - check the overlay on your own imaging setup, and keep
-# it FIXED across any experiment whose confluency values you intend to compare.
-DEFAULT_CONFLUENCY_SENSITIVITY = 0.7
+# Local standard deviation, in gray levels of the percentile-normalized image,
+# above which a pixel counts as covered by cells. Bare plastic and covered
+# surface are cleanly separated on this scale: measured on the saved runs,
+# bare surface sits at a local SD of ~7-17 and a fibroblast monolayer at
+# ~31-63, so anything in the low-to-mid 20s separates them.
+#
+# Calibrated against a ground-truth series built by compositing a known
+# fraction of real cell texture onto real bare-surface texture: 26 recovers
+# the true coverage to within ~2 percentage points from 0% to 100%.
+#
+# This is a calibration constant, not a universal one. It is expressed on the
+# normalized 0-255 scale, so it is insensitive to exposure, but it does depend
+# on magnification (via `win`). Check the overlay on your own imaging setup,
+# and keep it FIXED across any experiment whose confluency values you compare.
+CONFLUENCY_TEXTURE_THRESHOLD = 26.0
+
+# _normalize() stretches p1..p99 to fill 0-255, which is what makes the
+# threshold above exposure-independent. The cost is that an EMPTY field, which
+# has no real contrast to stretch, has its sensor noise amplified until bare
+# plastic looks textured - and then confluency reads high. Nothing in a single
+# frame distinguishes that from a genuine signal, so warn instead of guessing.
+# Measured on the saved runs: the flattest bare patch spans 8.6% of the raw
+# full scale, while fields containing cells span 15-35%. The margin either
+# side of this line is thin, and it rests on a single bare sample, so it only
+# ever produces a warning - never a different number.
+LOW_CONTRAST_FRACTION = 0.10
+
+# `confluency_sensitivity` scales that threshold. Lower counts more of the
+# field as covered. 1.0 is the calibrated value.
+DEFAULT_CONFLUENCY_SENSITIVITY = 1.0
 
 PERSIST_ROOT = os.environ.get("PERSIST_ROOT", "/runpod-volume")
 PERSIST_SUBDIR = os.environ.get("PERSIST_SUBDIR", "fibroblast")
@@ -156,8 +192,9 @@ else:
 
 # ----------------- Warm start: load the model once -----------------
 
-print(f"[startup] CUDA available: {_GPU_AVAILABLE}")
-MODEL = models.Cellpose(gpu=_GPU_AVAILABLE, model_type="cyto3")
+_DEVICE_NAME = str(_DEVICE_KWARGS.get("device", "cuda" if _GPU_AVAILABLE else "cpu"))
+print(f"[startup] Accelerator: {_DEVICE_NAME}")
+MODEL = models.Cellpose(gpu=_GPU_AVAILABLE, model_type="cyto3", **_DEVICE_KWARGS)
 print("[startup] Cellpose 'cyto3' loaded")
 
 
@@ -206,6 +243,20 @@ def _pil_to_b64(img: Image.Image, fmt: str = "PNG") -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _photo_b64(img: Image.Image) -> str:
+    """JPEG for the photographic panels, which is what they are.
+
+    The normalized field and the coverage overlay are grainy phase contrast;
+    PNG stores that grain losslessly at ~700 KB and ~1.2 MB, and base64 adds
+    a third on top. JPEG carries the same visual information at a tenth the
+    size, which matters because every panel travels in the job response and
+    a sweep can carry a dozen of them. Masks stay PNG - flat label colors
+    compress well losslessly, and JPEG would blur instance boundaries.
+    Artifacts persisted to the volume stay lossless PNG regardless.
+    """
+    return _pil_to_b64(img, fmt="JPEG")
+
+
 def _fig_to_pil(fig) -> Image.Image:
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight")
@@ -223,8 +274,10 @@ def _denoise(img: np.ndarray, h: int = 10) -> np.ndarray:
     return img
 
 
-def _normalize(img: np.ndarray) -> np.ndarray:
-    p1, p99 = np.percentile(img, (1, 99))
+def _normalize(img: np.ndarray, pct: tuple | None = None) -> np.ndarray:
+    """Percentile-stretch to 8 bits. `pct` reuses an existing (p1, p99) pass;
+    on a 3 MP image that percentile costs ~25 ms and two callers need it."""
+    p1, p99 = np.percentile(img, (1, 99)) if pct is None else pct
     img = np.clip((img - p1) / (p99 - p1 + 1e-8), 0, 1)
     return (img * 255).astype(np.uint8)
 
@@ -244,6 +297,25 @@ def _foreground_mask(
     contrast - a plain intensity threshold tracks the illumination gradient
     instead of the cells.
 
+    The threshold is ABSOLUTE, on the normalized image's own gray scale. It
+    used to be Otsu's threshold on a min-max rescaled copy of the SD map, and
+    that was wrong in two compounding ways:
+
+      * Otsu assumes the image contains both classes. A confluent field has no
+        bare surface, so Otsu split the cell population itself - smooth cell
+        bodies below, edges and halos above - and reported a fraction of a
+        fully covered plate. On a saved run of a confluent monolayer it gave
+        32%; the same image measures 99% here.
+      * min-max rescaling threw away the absolute scale that carries the
+        signal, and pinned it to the single most extreme speck of debris in
+        the frame instead.
+
+    Together those made the answer track the sensitivity slider rather than
+    the plate: on a ground-truth series the old rule was non-monotone, scoring
+    an empty field at 57% and a fully covered one at 21-85% depending only on
+    the slider. Absolute thresholding recovers true coverage to within ~2
+    percentage points across the same series.
+
     Morphological close then open joins texture within a cell and drops
     isolated specks. Deliberately NO hole filling: when the foreground touches
     the image border - normal at moderate confluency - a flood fill leaks and
@@ -255,10 +327,8 @@ def _foreground_mask(
     var = cv2.blur(g * g, (win, win)) - mu * mu
     sd = np.sqrt(np.maximum(var, 0))
 
-    u8 = cv2.normalize(sd, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    otsu, _ = cv2.threshold(u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    thr = int(np.clip(otsu * float(sensitivity), 1, 255))
-    binary = ((u8 >= thr).astype(np.uint8)) * 255
+    thr = CONFLUENCY_TEXTURE_THRESHOLD * float(sensitivity)
+    binary = ((sd >= thr).astype(np.uint8)) * 255
 
     if close_px:
         binary = cv2.morphologyEx(
@@ -271,6 +341,16 @@ def _foreground_mask(
             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_px, open_px)),
         )
     return binary > 0
+
+
+def _raw_contrast(gray: np.ndarray, pct: tuple | None = None) -> float:
+    """p1..p99 spread of the ORIGINAL pixels, as a fraction of full scale."""
+    if np.issubdtype(gray.dtype, np.integer):
+        full = float(np.iinfo(gray.dtype).max)
+    else:
+        full = float(max(np.max(gray), 1.0))
+    p1, p99 = np.percentile(gray, (1, 99)) if pct is None else pct
+    return float(p99 - p1) / max(full, 1e-9)
 
 
 def _coverage_percent(mask: np.ndarray) -> float:
@@ -319,20 +399,52 @@ def _persist_job_artifacts(
         return None
 
 
+# The image panels used to go through matplotlib, which rendered a 2048x1536
+# field into a 4x4 inch figure - a 400 px thumbnail - and cost ~150-280 ms
+# each. Writing them straight from the array is both ~10x faster and sharper,
+# since the panels are images, not charts. The titles matplotlib drew are
+# dropped: every one of them duplicated the Gradio label or gallery caption
+# already shown next to the image.
+#
+# Sizes are capped because every panel is base64'd into the job response.
+# Sweep masks get a tighter cap: there can be twelve of them in one response.
+RENDER_MAX_PX = 1024
+SWEEP_MASK_MAX_PX = 640
+
+
+def _fit(arr: np.ndarray, max_px: int, nearest: bool = False) -> np.ndarray:
+    """Downscale so the longest side is at most `max_px`. Never upscales.
+
+    `nearest` for label images - interpolating instance ids would invent
+    labels that are not in the segmentation.
+    """
+    h, w = arr.shape[:2]
+    longest = max(h, w)
+    if longest <= max_px:
+        return arr
+    f = max_px / longest
+    return cv2.resize(
+        arr, (max(1, round(w * f)), max(1, round(h * f))),
+        interpolation=cv2.INTER_NEAREST if nearest else cv2.INTER_AREA,
+    )
+
+
 def _render_norm(norm_gray: np.ndarray) -> Image.Image:
-    fig, ax = plt.subplots(figsize=(4, 4))
-    ax.imshow(norm_gray, cmap="gray")
-    ax.set_title("Normalized Image")
-    ax.axis("off")
-    return _fig_to_pil(fig)
+    return Image.fromarray(_fit(norm_gray, RENDER_MAX_PX))
 
 
-def _render_mask(masks: np.ndarray, title: str = "Segmentation Mask") -> Image.Image:
-    fig, ax = plt.subplots(figsize=(4, 4))
-    ax.imshow(masks, cmap="nipy_spectral")
-    ax.set_title(title)
-    ax.axis("off")
-    return _fig_to_pil(fig)
+def _render_mask(masks: np.ndarray, max_px: int = RENDER_MAX_PX) -> Image.Image:
+    """Instance labels in distinct colors, black background.
+
+    A fixed-seed random LUT rather than a continuous colormap: neighbouring
+    ids get unrelated colors, so touching cells stay visually separable.
+    """
+    small = _fit(masks, max_px, nearest=True)
+    lut = np.random.default_rng(0).integers(
+        60, 256, size=(int(masks.max()) + 1, 3), dtype=np.uint8
+    )
+    lut[0] = 0
+    return Image.fromarray(lut[small])
 
 
 def _render_confluency_overlay(norm_gray: np.ndarray, fg: np.ndarray,
@@ -344,16 +456,16 @@ def _render_confluency_overlay(norm_gray: np.ndarray, fg: np.ndarray,
     """
     rgb = cv2.cvtColor(norm_gray, cv2.COLOR_GRAY2RGB)
     rgb[fg] = (0.55 * rgb[fg] + 0.45 * np.array([255, 0, 0])).astype(np.uint8)
-    fig, ax = plt.subplots(figsize=(4, 4))
-    ax.imshow(rgb)
-    ax.set_title(f"Cell coverage: {confluency:.1f}%")
-    ax.axis("off")
-    return _fig_to_pil(fig)
+    return Image.fromarray(_fit(rgb, RENDER_MAX_PX))
 
 
 def _render_hist(norm_gray: np.ndarray) -> Image.Image:
+    # ax.hist() would re-bin every pixel in Python; the image is uint8, so its
+    # histogram is a bincount. Same 256 bars, a fraction of the time.
+    counts = np.bincount(norm_gray.ravel(), minlength=256)
     fig, ax = plt.subplots(figsize=(4, 3))
-    ax.hist(norm_gray.ravel(), bins=256, range=(0, 255), color="gray", edgecolor="black")
+    ax.bar(np.arange(256), counts, width=1.0, color="gray", edgecolor="black",
+           linewidth=0.3)
     ax.set_title("Intensity Histogram")
     ax.set_xlabel("Pixel Intensity")
     ax.set_ylabel("Frequency")
@@ -488,7 +600,8 @@ def handler(job):
         # flatten everything above 255 to white and destroy the image.
         # Percentile-stretching to 8-bit up front makes the optional filters
         # safe at any input bit depth.
-        norm_gray = _normalize(gray)
+        raw_pct = tuple(np.percentile(gray, (1, 99)))
+        norm_gray = _normalize(gray, pct=raw_pct)
 
         if denoise:
             norm_gray = _denoise(norm_gray)
@@ -505,6 +618,15 @@ def handler(job):
         foreground = _foreground_mask(norm_gray, sensitivity=sensitivity)
         confluency = _coverage_percent(foreground)
 
+        contrast = _raw_contrast(gray, pct=raw_pct)
+        confluency_warning = None
+        if contrast < LOW_CONTRAST_FRACTION:
+            confluency_warning = (
+                f"Low image contrast ({contrast * 100:.1f}% of full scale). "
+                f"Normalization amplifies noise in a nearly empty field, so "
+                f"confluency can read high on bare surface. Check the overlay."
+            )
+
         norm_img = _render_norm(norm_gray)
         hist_img = _render_hist(norm_gray)
         overlay_img = _render_confluency_overlay(norm_gray, foreground, confluency)
@@ -520,6 +642,13 @@ def handler(job):
             "blur": blur,
             "cell_line": cell_line,
             "confluency_sensitivity": sensitivity,
+            # Recorded so runs measured with the old Otsu rule are never
+            # silently compared against these.
+            "confluency_method": (
+                f"local-SD >= {CONFLUENCY_TEXTURE_THRESHOLD * sensitivity:.1f} "
+                f"gray levels (absolute, v2)"
+            ),
+            "raw_contrast": contrast,
         }
         images = {
             "normalized.png": norm_img,
@@ -539,9 +668,7 @@ def handler(job):
                     "cell_count": int((labels != 0).sum()),
                     "mask_coverage": _coverage_percent(masks),
                 }
-                mask_img = _render_mask(
-                    masks, f"d = {d:g} px  |  {entry['cell_count']} cells"
-                )
+                mask_img = _render_mask(masks, max_px=SWEEP_MASK_MAX_PX)
                 images[f"mask_d{d:g}.png"] = mask_img
                 entry["mask_b64"] = _pil_to_b64(mask_img)
                 sweep.append(entry)
@@ -551,6 +678,7 @@ def handler(job):
 
             stats = {
                 "confluency": confluency,
+                "confluency_warning": confluency_warning,
                 "sweep": [
                     {k: v for k, v in e.items() if k != "mask_b64"} for e in sweep
                 ],
@@ -564,10 +692,11 @@ def handler(job):
             response = {
                 "sweep": sweep,
                 "confluency": confluency,
+                "confluency_warning": confluency_warning,
                 "sweep_plot_b64": _pil_to_b64(plot_img),
-                "normalized_b64": _pil_to_b64(norm_img),
+                "normalized_b64": _photo_b64(norm_img),
                 "histogram_b64": _pil_to_b64(hist_img),
-                "confluency_overlay_b64": _pil_to_b64(overlay_img),
+                "confluency_overlay_b64": _photo_b64(overlay_img),
                 "min_intensity": min_intensity,
                 "max_intensity": max_intensity,
                 "cell_line": cell_line,
@@ -587,6 +716,7 @@ def handler(job):
         stats = {
             "cell_count": int((labels != 0).sum()),
             "confluency": confluency,
+            "confluency_warning": confluency_warning,
             "mask_coverage": _coverage_percent(masks),
             "min_intensity": min_intensity,
             "max_intensity": max_intensity,
@@ -600,10 +730,10 @@ def handler(job):
         response = {
             **stats,
             "cell_line": cell_line,
-            "normalized_b64": _pil_to_b64(norm_img),
+            "normalized_b64": _photo_b64(norm_img),
             "mask_b64": _pil_to_b64(mask_img),
             "histogram_b64": _pil_to_b64(hist_img),
-            "confluency_overlay_b64": _pil_to_b64(overlay_img),
+            "confluency_overlay_b64": _photo_b64(overlay_img),
         }
         if persist_path:
             response["persist_path"] = persist_path
