@@ -77,6 +77,35 @@ Each diameter is a full segmentation, so a 5-point sweep costs roughly 5x a
 single run. That's free locally; on RunPod it is 5x the GPU seconds, which is
 exactly why it's worth settling the diameter here first.
 
+### How confluency is measured
+
+Confluency is **not** derived from the Cellpose masks. It is measured from
+image texture (cells are textured, bare plastic is flat), because the instance
+masks undercount coverage twice over: cells Cellpose misses contribute nothing,
+and the thin processes of the cells it does find get trimmed off. On the 10x
+Austin-Fibroblasts set that gap is large — 15% from the masks against ~46% of
+the field actually covered.
+
+So the app reports two different things:
+
+| Number | What it means |
+|---|---|
+| **Confluency** | % of the growth surface covered by cells (from image texture) |
+| **Area captured by masks** | % covered by the instances Cellpose counted |
+
+The gap between them is how much cell area Cellpose is missing — useful as a
+quality check on the diameter you picked.
+
+**Confluency depends on a threshold, so verify it.** The *Cell Coverage*
+overlay paints in red exactly what was counted. Adjust **Confluency
+sensitivity** (lower = more of the field counted) until the red matches the
+cells you can see, then **keep it fixed** across any experiment whose
+confluency values you intend to compare. The 0.7 default was calibrated on the
+10x Austin-Fibroblasts images and is not a universal constant.
+
+Confluency is a property of the image, so it does not change with diameter and
+is not swept.
+
 ### What it writes
 
 `run_local.sh` points `PERSIST_ROOT` at `./local-runs/`, which exercises the

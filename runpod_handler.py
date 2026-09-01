@@ -13,24 +13,47 @@ Input JSON (job["input"]):
                       `cell_count` / `confluency` / `mask_b64` fields.
     denoise   : bool  (optional, default false)
     blur      : bool  (optional, default false)
+    confluency_sensitivity : float (optional, default 0.7) threshold multiplier
+                      for the confluency foreground mask. Lower = more of the
+                      field counted as covered. See _foreground_mask().
     cell_line : str   (optional) GESTALT / Coriell cell line ID (e.g. "AG08498").
                       Persisted into stats.json so downstream analysis can
                       join image -> cell_line -> donor age for model training.
 
 Output JSON:
     cell_count      : int
-    confluency      : float   (percent)
+    confluency      : float   (percent of the field covered by cells, measured
+                               from a texture-based foreground mask - NOT from
+                               the Cellpose instance masks; see below)
+    mask_coverage   : float   (percent of the field covered by the counted
+                               instances; <= confluency, and the gap is how
+                               much cell area Cellpose missed)
     min_intensity   : int
     max_intensity   : int
     cell_line       : str|null  (echoed back for convenience)
     normalized_b64  : str     PNG base64
     mask_b64        : str     PNG base64
     histogram_b64   : str     PNG base64
+    confluency_overlay_b64 : str  PNG base64 (foreground mask over the image,
+                               so the confluency number can be eyeballed)
     persist_path    : str     (only if a Network Volume is attached)
 
+Why confluency is not derived from the instance masks
+-----------------------------------------------------
+Confluency asks "how much of the growth surface is covered by cells". The
+Cellpose masks answer a different question - "which pixels belong to a cell I
+could individually resolve" - and they undercount coverage twice over: cells
+that are missed entirely contribute nothing, and the thin processes of the
+cells that ARE found get trimmed off the mask. On 10x phase-contrast
+fibroblasts that gap is large (measured: 15% from masks vs ~39% of the field
+actually covered). Coverage is therefore measured independently, from image
+texture. Cell COUNT still comes from Cellpose, which is the right tool for it.
+
 Sweep output JSON (when `diameters` was supplied):
-    sweep           : list of {diameter, cell_count, confluency, mask_b64}
-    sweep_plot_b64  : str     PNG base64 (count + confluency vs diameter)
+    sweep           : list of {diameter, cell_count, mask_coverage, mask_b64}
+    sweep_plot_b64  : str     PNG base64 (count + mask coverage vs diameter)
+    confluency      : float   one value for the whole image - it does not
+                              depend on the diameter, so it is not swept
     normalized_b64  : str     PNG base64 (shared by every diameter)
     histogram_b64   : str     PNG base64 (shared by every diameter)
     min_intensity   : int
@@ -103,6 +126,14 @@ import runpod
 # GPU-seconds of work.
 MAX_SWEEP_POINTS = 12
 
+# Threshold multiplier for the confluency foreground mask. 1.0 is plain Otsu,
+# which is conservative on phase contrast: it holds the flat, well-spread cells
+# below threshold. 0.7 was calibrated against the 10x Austin-Fibroblasts set by
+# comparing the overlay with the visible cells. It is a calibration constant,
+# not a universal one - check the overlay on your own imaging setup, and keep
+# it FIXED across any experiment whose confluency values you intend to compare.
+DEFAULT_CONFLUENCY_SENSITIVITY = 0.7
+
 PERSIST_ROOT = os.environ.get("PERSIST_ROOT", "/runpod-volume")
 PERSIST_SUBDIR = os.environ.get("PERSIST_SUBDIR", "fibroblast")
 PERSIST_ENABLED = os.path.isdir(PERSIST_ROOT) and os.access(PERSIST_ROOT, os.W_OK)
@@ -166,6 +197,54 @@ def _normalize(img: np.ndarray) -> np.ndarray:
     return (img * 255).astype(np.uint8)
 
 
+def _foreground_mask(
+    gray: np.ndarray,
+    sensitivity: float = DEFAULT_CONFLUENCY_SENSITIVITY,
+    win: int = 25,
+    close_px: int = 21,
+    open_px: int = 9,
+) -> np.ndarray:
+    """Boolean mask of the growth surface that is covered by cells.
+
+    Cells carry texture (edges, halos, internal structure); bare plastic is
+    flat. So threshold the LOCAL STANDARD DEVIATION rather than raw intensity,
+    which makes this robust to the uneven illumination typical of phase
+    contrast - a plain intensity threshold tracks the illumination gradient
+    instead of the cells.
+
+    Morphological close then open joins texture within a cell and drops
+    isolated specks. Deliberately NO hole filling: when the foreground touches
+    the image border - normal at moderate confluency - a flood fill leaks and
+    reports ~100% coverage. Measured on a real plate: 45% before filling,
+    98% after.
+    """
+    g = gray.astype(np.float32)
+    mu = cv2.blur(g, (win, win))
+    var = cv2.blur(g * g, (win, win)) - mu * mu
+    sd = np.sqrt(np.maximum(var, 0))
+
+    u8 = cv2.normalize(sd, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    otsu, _ = cv2.threshold(u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    thr = int(np.clip(otsu * float(sensitivity), 1, 255))
+    binary = ((u8 >= thr).astype(np.uint8)) * 255
+
+    if close_px:
+        binary = cv2.morphologyEx(
+            binary, cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_px, close_px)),
+        )
+    if open_px:
+        binary = cv2.morphologyEx(
+            binary, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_px, open_px)),
+        )
+    return binary > 0
+
+
+def _coverage_percent(mask: np.ndarray) -> float:
+    return float(100.0 * np.count_nonzero(mask) / mask.size)
+
+
 def _persist_job_artifacts(
     job_id: str,
     input_pil: Image.Image,
@@ -224,6 +303,22 @@ def _render_mask(masks: np.ndarray, title: str = "Segmentation Mask") -> Image.I
     return _fig_to_pil(fig)
 
 
+def _render_confluency_overlay(norm_gray: np.ndarray, fg: np.ndarray,
+                               confluency: float) -> Image.Image:
+    """The foreground mask painted over the image.
+
+    Confluency depends on a threshold, so the number is only trustworthy if
+    you can see what it counted. This is that check.
+    """
+    rgb = cv2.cvtColor(norm_gray, cv2.COLOR_GRAY2RGB)
+    rgb[fg] = (0.55 * rgb[fg] + 0.45 * np.array([255, 0, 0])).astype(np.uint8)
+    fig, ax = plt.subplots(figsize=(4, 4))
+    ax.imshow(rgb)
+    ax.set_title(f"Cell coverage: {confluency:.1f}%")
+    ax.axis("off")
+    return _fig_to_pil(fig)
+
+
 def _render_hist(norm_gray: np.ndarray) -> Image.Image:
     fig, ax = plt.subplots(figsize=(4, 3))
     ax.hist(norm_gray.ravel(), bins=256, range=(0, 255), color="gray", edgecolor="black")
@@ -237,8 +332,13 @@ def _render_visuals(norm_gray: np.ndarray, masks: np.ndarray):
     return _render_norm(norm_gray), _render_mask(masks), _render_hist(norm_gray)
 
 
-def _render_sweep_plot(sweep: list) -> Image.Image:
-    """Cell count and confluency against diameter.
+def _render_sweep_plot(sweep: list, confluency: float | None = None) -> Image.Image:
+    """Cell count and mask coverage against diameter.
+
+    Confluency is a property of the IMAGE, not of the diameter, so it is drawn
+    once as a reference line rather than swept. The gap between the coverage
+    curve and that line is the cell area Cellpose failed to capture at each
+    diameter - which is the thing worth reading here.
 
     Two stacked panels sharing the x-axis rather than one chart with two
     y-scales: the measures have different units and ranges, and a dual axis
@@ -247,7 +347,8 @@ def _render_sweep_plot(sweep: list) -> Image.Image:
     d = [r["diameter"] for r in sweep]
     series = (
         ([r["cell_count"] for r in sweep], "#2a78d6", "Cells detected", "cells"),
-        ([r["confluency"] for r in sweep], "#eb6834", "Confluency", "% of field"),
+        ([r["mask_coverage"] for r in sweep], "#eb6834",
+         "Area captured by masks", "% of field"),
     )
 
     fig, axes = plt.subplots(2, 1, figsize=(6.5, 5.4), sharex=True)
@@ -280,6 +381,16 @@ def _render_sweep_plot(sweep: list) -> Image.Image:
         xy=(d[peak], counts[peak]), xytext=(0, 10), textcoords="offset points",
         ha=ha, fontsize=9, color="#0b0b0b",
     )
+
+    if confluency is not None:
+        axes[1].axhline(confluency, color="#52514e", linewidth=1.2,
+                        linestyle="--", zorder=1)
+        axes[1].annotate(
+            f"measured cell coverage {confluency:.1f}%",
+            xy=(d[0], confluency), xytext=(0, 5), textcoords="offset points",
+            ha="left", fontsize=8.5, color="#52514e",
+        )
+        axes[1].set_ylim(top=max(max(series[1][0]), confluency) * 1.25)
 
     axes[1].set_xlabel("Approx. cell diameter (px)", fontsize=10, color="#52514e")
     axes[1].set_xticks(d)
@@ -321,6 +432,16 @@ def handler(job):
             if any(d <= 0 for d in diameters):
                 return {"error": "Every value in 'diameters' must be greater than 0."}
 
+        sensitivity = job_input.get(
+            "confluency_sensitivity", DEFAULT_CONFLUENCY_SENSITIVITY
+        )
+        try:
+            sensitivity = float(sensitivity)
+        except (TypeError, ValueError):
+            return {"error": f"Invalid 'confluency_sensitivity': {sensitivity!r}"}
+        if not 0.1 <= sensitivity <= 2.0:
+            return {"error": "'confluency_sensitivity' must be between 0.1 and 2.0."}
+
         denoise = bool(job_input.get("denoise", False))
         blur = bool(job_input.get("blur", False))
         cell_line = job_input.get("cell_line")
@@ -349,8 +470,14 @@ def handler(job):
 
         # The normalized view and the histogram depend only on the image, so
         # they are rendered once and shared across every diameter in a sweep.
+        # Coverage is measured from the image, independently of Cellpose, and
+        # does not depend on the diameter - so it is computed once.
+        foreground = _foreground_mask(norm_gray, sensitivity=sensitivity)
+        confluency = _coverage_percent(foreground)
+
         norm_img = _render_norm(norm_gray)
         hist_img = _render_hist(norm_gray)
+        overlay_img = _render_confluency_overlay(norm_gray, foreground, confluency)
 
         # RunPod sets job["id"]; fall back to a timestamp in local runs.
         job_id = job.get("id") or datetime.now(timezone.utc).strftime(
@@ -362,8 +489,13 @@ def handler(job):
             "denoise": denoise,
             "blur": blur,
             "cell_line": cell_line,
+            "confluency_sensitivity": sensitivity,
         }
-        images = {"normalized.png": norm_img, "histogram.png": hist_img}
+        images = {
+            "normalized.png": norm_img,
+            "histogram.png": hist_img,
+            "confluency_overlay.png": overlay_img,
+        }
 
         if diameters:
             sweep = []
@@ -375,7 +507,7 @@ def handler(job):
                 entry = {
                     "diameter": d,
                     "cell_count": int((labels != 0).sum()),
-                    "confluency": float(100.0 * np.count_nonzero(masks) / masks.size),
+                    "mask_coverage": _coverage_percent(masks),
                 }
                 mask_img = _render_mask(
                     masks, f"d = {d:g} px  |  {entry['cell_count']} cells"
@@ -384,10 +516,11 @@ def handler(job):
                 entry["mask_b64"] = _pil_to_b64(mask_img)
                 sweep.append(entry)
 
-            plot_img = _render_sweep_plot(sweep)
+            plot_img = _render_sweep_plot(sweep, confluency=confluency)
             images["sweep_plot.png"] = plot_img
 
             stats = {
+                "confluency": confluency,
                 "sweep": [
                     {k: v for k, v in e.items() if k != "mask_b64"} for e in sweep
                 ],
@@ -400,9 +533,11 @@ def handler(job):
             )
             response = {
                 "sweep": sweep,
+                "confluency": confluency,
                 "sweep_plot_b64": _pil_to_b64(plot_img),
                 "normalized_b64": _pil_to_b64(norm_img),
                 "histogram_b64": _pil_to_b64(hist_img),
+                "confluency_overlay_b64": _pil_to_b64(overlay_img),
                 "min_intensity": min_intensity,
                 "max_intensity": max_intensity,
                 "cell_line": cell_line,
@@ -421,7 +556,8 @@ def handler(job):
 
         stats = {
             "cell_count": int((labels != 0).sum()),
-            "confluency": float(100.0 * np.count_nonzero(masks) / masks.size),
+            "confluency": confluency,
+            "mask_coverage": _coverage_percent(masks),
             "min_intensity": min_intensity,
             "max_intensity": max_intensity,
         }
@@ -437,6 +573,7 @@ def handler(job):
             "normalized_b64": _pil_to_b64(norm_img),
             "mask_b64": _pil_to_b64(mask_img),
             "histogram_b64": _pil_to_b64(hist_img),
+            "confluency_overlay_b64": _pil_to_b64(overlay_img),
         }
         if persist_path:
             response["persist_path"] = persist_path

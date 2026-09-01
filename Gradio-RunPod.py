@@ -142,7 +142,7 @@ def _sweep_diameters(dmin, dmax, steps):
 
 def _error(msg):
     """Uniform error tuple across every output slot."""
-    return (None, None, None, msg, msg, None, None, None)
+    return (None, None, None, msg, msg, None, None, None, None)
 
 
 def _render_sweep(output, cell_line, elapsed):
@@ -158,32 +158,42 @@ def _render_sweep(output, cell_line, elapsed):
     hist = _b64_to_image(output["histogram_b64"])
     plot = _b64_to_image(output["sweep_plot_b64"])
 
+    overlay = _b64_to_image(output["confluency_overlay_b64"])
+    confluency = output["confluency"]
+
     gallery = [
         (_b64_to_image(e["mask_b64"]), f"d = {e['diameter']:g} px | {e['cell_count']} cells")
         for e in sweep
     ]
     table = [
-        [e["diameter"], e["cell_count"], round(e["confluency"], 2)] for e in sweep
+        [e["diameter"], e["cell_count"], round(e["mask_coverage"], 2)] for e in sweep
     ]
 
     line_tag = output.get("cell_line") or (
         cell_line if cell_line and cell_line != "(Not specified)" else "—"
     )
     best = max(sweep, key=lambda e: e["cell_count"])
+    closest = max(sweep, key=lambda e: e["mask_coverage"])
     stats_md = (
         "### Sweep\n\n"
         f"**Cell Line:** {line_tag}\n\n"
+        f"**Confluency (whole image):** {confluency:.2f}%\n\n"
         f"**Diameters tried:** {len(sweep)} "
         f"({sweep[0]['diameter']:g}–{sweep[-1]['diameter']:g} px)\n\n"
         f"**Most cells:** {best['cell_count']} at d = {best['diameter']:g} px\n\n"
+        f"**Best area capture:** {closest['mask_coverage']:.1f}% of the field "
+        f"at d = {closest['diameter']:g} px\n\n"
         f"**Min Intensity:** {output['min_intensity']}\n\n"
         f"**Max Intensity:** {output['max_intensity']}\n\n"
         f"**Processing Time:** {elapsed} s\n\n"
-        "_Highest count is not automatically the right diameter — compare the "
-        "masks against the cells you can see._"
+        "_Confluency is measured from the image, so it does not change with "
+        "diameter. The table shows how much of that area each diameter's masks "
+        "actually captured — the closer to the confluency figure, the less "
+        "Cellpose is missing. Highest cell count is not automatically right; "
+        "compare the masks against the cells you can see._"
     )
     status = f"Swept {len(sweep)} diameters in {elapsed}s"
-    return norm, None, hist, stats_md, status, plot, gallery, table
+    return norm, None, hist, stats_md, status, plot, gallery, table, overlay
 
 
 def _render_output(output, cell_line, elapsed):
@@ -198,6 +208,7 @@ def _render_output(output, cell_line, elapsed):
     norm = _b64_to_image(output["normalized_b64"])
     mask = _b64_to_image(output["mask_b64"])
     hist = _b64_to_image(output["histogram_b64"])
+    overlay = _b64_to_image(output["confluency_overlay_b64"])
 
     line_tag = output.get("cell_line") or (
         cell_line if cell_line and cell_line != "(Not specified)" else "—"
@@ -207,12 +218,13 @@ def _render_output(output, cell_line, elapsed):
         f"**Cell Line:** {line_tag}\n\n"
         f"**Cell Count:** {output['cell_count']}\n\n"
         f"**Confluency:** {output['confluency']:.2f}%\n\n"
+        f"**Area captured by masks:** {output.get('mask_coverage', float('nan')):.2f}%\n\n"
         f"**Min Intensity:** {output['min_intensity']}\n\n"
         f"**Max Intensity:** {output['max_intensity']}\n\n"
         f"**Processing Time:** {elapsed} s"
     )
     return (norm, mask, hist, stats_md, f"Complete in {elapsed}s",
-            None, None, None)
+            None, None, None, overlay)
 
 
 def _invoke_local(job_input):
@@ -227,7 +239,7 @@ def _invoke_local(job_input):
 
 
 def invoke_runpod(image, mode, diameter, d_min, d_max, d_steps,
-                  denoise, blur, cell_line):
+                  sensitivity, denoise, blur, cell_line):
     """Submit a job to the RunPod endpoint and poll for the result.
 
     `mode` is either "Single diameter" or "Diameter sweep"; the sweep runs one
@@ -245,6 +257,7 @@ def invoke_runpod(image, mode, diameter, d_min, d_max, d_steps,
     try:
         job_input = {
             "image_b64": _image_to_b64(image),
+            "confluency_sensitivity": float(sensitivity),
             "denoise": bool(denoise),
             "blur": bool(blur),
             "cell_line": cell_line if cell_line and cell_line != "(Not specified)" else None,
@@ -357,6 +370,13 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
                 )
                 sweep_preview = gr.Markdown()
 
+            sensitivity_slider = gr.Slider(
+                minimum=0.3, maximum=1.5, step=0.05, value=0.7,
+                label="Confluency sensitivity",
+                info="Lower counts more of the field as covered. Check the "
+                     "Cell Coverage overlay and adjust until the red matches "
+                     "the cells you see; then keep it fixed across an experiment.",
+            )
             denoise_checkbox = gr.Checkbox(label="Apply Denoising")
             blur_checkbox = gr.Checkbox(label="Apply Gaussian Blur")
             run_btn = gr.Button("Run Detection", variant="primary")
@@ -375,6 +395,9 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
             )
             stats_output = gr.Markdown(label="Statistics")
             output1 = gr.Image(label="Normalized Image", interactive=False)
+            overlay_output = gr.Image(
+                label="Cell Coverage (red = counted as covered)", interactive=False
+            )
             with gr.Group() as single_results:
                 output2 = gr.Image(
                     label="Segmentation Mask", interactive=False, height=300
@@ -388,7 +411,7 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
                     object_fit="contain",
                 )
                 sweep_table = gr.Dataframe(
-                    headers=["Diameter (px)", "Cells", "Confluency (%)"],
+                    headers=["Diameter (px)", "Cells", "Area captured (%)"],
                     datatype=["number", "number", "number"],
                     label="Sweep results",
                     interactive=False,
@@ -428,9 +451,10 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
         fn=invoke_runpod,
         inputs=[image_input, mode_radio, diameter_slider,
                 d_min_slider, d_max_slider, d_steps_slider,
-                denoise_checkbox, blur_checkbox, cell_line_dropdown],
+                sensitivity_slider, denoise_checkbox, blur_checkbox,
+                cell_line_dropdown],
         outputs=[output1, output2, output3, stats_output, status_output,
-                 sweep_plot_output, sweep_gallery, sweep_table],
+                 sweep_plot_output, sweep_gallery, sweep_table, overlay_output],
     )
 
     demo.load(
