@@ -45,3 +45,7 @@ env/
 .vscode/
 *.swp
 *~
+
+# Local test-run artifacts (run_local.sh)
+local-runs/
+.cellpose_models/

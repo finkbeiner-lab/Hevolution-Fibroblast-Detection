@@ -1,0 +1,23 @@
+# Local end-to-end testing: frontend + worker in one environment.
+#
+# Mirrors requirements-runpod.txt (the worker) plus requirements-frontend.txt
+# (the UI). Cellpose is pinned <4 because the worker uses the 3.x
+# models.Cellpose API; cellpose 4 renamed it and swaps in a different model
+# (Cellpose-SAM), so 4.x would neither import nor reproduce production results.
+#
+#   conda create -n fibroblast-local python=3.11 -y
+#   conda activate fibroblast-local
+#   pip install -r requirements-local.txt
+
+# --- worker ---
+torch>=2.2
+cellpose>=3.0.0,<4.0
+numpy>=1.26,<3
+Pillow>=9.5
+opencv-python-headless>=4.8
+matplotlib>=3.7
+runpod>=1.6.0
+
+# --- frontend ---
+gradio>=4.0.0
+requests>=2.31.0

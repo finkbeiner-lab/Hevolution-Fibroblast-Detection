@@ -13,6 +13,12 @@ Optional:
     GRADIO_SERVER_PORT  : default 7860
     RUNPOD_TIMEOUT_SEC  : max seconds to wait for a job (default 300)
     RUNPOD_POLL_SEC     : poll interval (default 3)
+
+Local testing:
+    LOCAL_INFERENCE=1   : skip RunPod entirely and call runpod_handler.handler()
+                          in this process. Requires the worker dependencies
+                          (cellpose, torch, opencv) to be installed locally and
+                          needs no API key. The UI is identical either way.
 """
 
 import base64
@@ -20,6 +26,7 @@ import io
 import logging
 import os
 import time
+from datetime import datetime, timezone
 
 import gradio as gr
 import requests
@@ -27,6 +34,9 @@ from PIL import Image
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+# Local testing switch: run the worker in-process instead of on RunPod.
+LOCAL_INFERENCE = os.getenv("LOCAL_INFERENCE", "").strip().lower() in ("1", "true", "yes")
 
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY", "").strip()
 RUNPOD_ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID", "").strip()
@@ -92,6 +102,8 @@ def _b64_to_image(b64: str) -> Image.Image:
 
 
 def _config_error() -> str | None:
+    if LOCAL_INFERENCE:
+        return None
     missing = []
     if not RUNPOD_API_KEY:
         missing.append("RUNPOD_API_KEY")
@@ -105,6 +117,46 @@ def _config_error() -> str | None:
             "  RUNPOD_ENDPOINT_ID=<endpoint-id-from-runpod-console>"
         )
     return None
+
+
+def _render_output(output, cell_line, elapsed):
+    """Turn a worker response dict into the five Gradio outputs.
+
+    Shared by the RunPod path and the LOCAL_INFERENCE path so both render
+    results identically.
+    """
+    if "error" in output:
+        err = f"Worker error: {output['error']}"
+        return None, None, None, err, err
+
+    norm = _b64_to_image(output["normalized_b64"])
+    mask = _b64_to_image(output["mask_b64"])
+    hist = _b64_to_image(output["histogram_b64"])
+
+    line_tag = output.get("cell_line") or (
+        cell_line if cell_line and cell_line != "(Not specified)" else "—"
+    )
+    stats_md = (
+        "### Statistics\n\n"
+        f"**Cell Line:** {line_tag}\n\n"
+        f"**Cell Count:** {output['cell_count']}\n\n"
+        f"**Confluency:** {output['confluency']:.2f}%\n\n"
+        f"**Min Intensity:** {output['min_intensity']}\n\n"
+        f"**Max Intensity:** {output['max_intensity']}\n\n"
+        f"**Processing Time:** {elapsed} s"
+    )
+    return norm, mask, hist, stats_md, f"Complete in {elapsed}s"
+
+
+def _invoke_local(job_input):
+    """Run the RunPod worker in this process (LOCAL_INFERENCE=1).
+
+    Imported lazily so the normal EC2 deployment never needs cellpose/torch.
+    """
+    from runpod_handler import handler
+
+    job_id = datetime.now(timezone.utc).strftime("local-%Y%m%dT%H%M%S%f")
+    return handler({"id": job_id, "input": job_input}) or {}
 
 
 def invoke_runpod(image, diameter, denoise, blur, cell_line):
@@ -121,15 +173,20 @@ def invoke_runpod(image, diameter, denoise, blur, cell_line):
         return None, None, None, msg, msg
 
     try:
-        payload = {
-            "input": {
-                "image_b64": _image_to_b64(image),
-                "diameter": float(diameter) if diameter else None,
-                "denoise": bool(denoise),
-                "blur": bool(blur),
-                "cell_line": cell_line if cell_line and cell_line != "(Not specified)" else None,
-            }
+        job_input = {
+            "image_b64": _image_to_b64(image),
+            "diameter": float(diameter) if diameter else None,
+            "denoise": bool(denoise),
+            "blur": bool(blur),
+            "cell_line": cell_line if cell_line and cell_line != "(Not specified)" else None,
         }
+        payload = {"input": job_input}
+
+        if LOCAL_INFERENCE:
+            logger.info("LOCAL_INFERENCE=1 - running the worker in-process")
+            started = time.time()
+            output = _invoke_local(job_input)
+            return _render_output(output, cell_line, int(time.time() - started))
 
         logger.info("Submitting job to RunPod endpoint %s", RUNPOD_ENDPOINT_ID)
         submit = requests.post(
@@ -153,28 +210,7 @@ def invoke_runpod(image, diameter, denoise, blur, cell_line):
 
             if state == "COMPLETED":
                 output = data.get("output") or {}
-                if "error" in output:
-                    err = f"Worker error: {output['error']}"
-                    return None, None, None, err, err
-
-                norm = _b64_to_image(output["normalized_b64"])
-                mask = _b64_to_image(output["mask_b64"])
-                hist = _b64_to_image(output["histogram_b64"])
-
-                elapsed = int(time.time() - started)
-                line_tag = output.get("cell_line") or (
-                    cell_line if cell_line and cell_line != "(Not specified)" else "—"
-                )
-                stats_md = (
-                    "### Statistics\n\n"
-                    f"**Cell Line:** {line_tag}\n\n"
-                    f"**Cell Count:** {output['cell_count']}\n\n"
-                    f"**Confluency:** {output['confluency']:.2f}%\n\n"
-                    f"**Min Intensity:** {output['min_intensity']}\n\n"
-                    f"**Max Intensity:** {output['max_intensity']}\n\n"
-                    f"**Processing Time:** {elapsed} s"
-                )
-                return norm, mask, hist, stats_md, f"Complete in {elapsed}s"
+                return _render_output(output, cell_line, int(time.time() - started))
 
             if state in ("FAILED", "CANCELLED", "TIMED_OUT"):
                 err = f"RunPod job {state}. Details: {data.get('error') or data}"
@@ -216,8 +252,11 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
             denoise_checkbox = gr.Checkbox(label="Apply Denoising")
             blur_checkbox = gr.Checkbox(label="Apply Gaussian Blur")
             run_btn = gr.Button("Run Detection", variant="primary")
-            endpoint_label = RUNPOD_ENDPOINT_ID or "(not configured)"
-            gr.Markdown(f"**RunPod endpoint:** `{endpoint_label}`")
+            if LOCAL_INFERENCE:
+                gr.Markdown("**Backend:** `local (in-process cellpose)`")
+            else:
+                endpoint_label = RUNPOD_ENDPOINT_ID or "(not configured)"
+                gr.Markdown(f"**RunPod endpoint:** `{endpoint_label}`")
 
         with gr.Column():
             status_output = gr.Textbox(
