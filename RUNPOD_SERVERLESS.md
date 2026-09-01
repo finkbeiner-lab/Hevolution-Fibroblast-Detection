@@ -3,13 +3,18 @@
 Architecture:
 
 ```
-Browser  --->  Gradio UI on AWS (Gradio-Batch.py)  --HTTPS-->  RunPod Serverless
-                                                                (runpod_handler.py)
+Browser  --->  Gradio UI on AWS (Gradio-RunPod.py)  --HTTPS-->  RunPod Serverless
+                                                                 (runpod_handler.py)
 ```
 
 The AWS box only handles the UI. Every "Run Detection" click posts the
 uploaded image (base64) to your RunPod Serverless endpoint and renders the
 JSON response.
+
+> **Before deploying anything, test for free.** `LOCAL_INFERENCE=1` runs this
+> same UI against the worker code in-process, no endpoint and no GPU spend.
+> See [LOCAL_TESTING.md](./LOCAL_TESTING.md); the branch-to-production
+> workflow is in [WORKFLOW.md](./WORKFLOW.md).
 
 ---
 
@@ -19,26 +24,43 @@ RunPod Serverless pulls a Docker image from any public/private registry
 (Docker Hub, GHCR, ECR, etc.). Build it once, push it, then point the
 endpoint at the tag.
 
+Tag the image with the **commit SHA it was built from**, not `latest`. A
+mutable `latest` tag leaves nothing to roll back to; a SHA tag makes rollback a
+console repoint with no rebuild (see [WORKFLOW.md](./WORKFLOW.md)).
+
 ```bash
-# From the repo root
-docker build -f Dockerfile.runpod -t <your-dockerhub-user>/fibroblast-runpod:latest .
-docker push <your-dockerhub-user>/fibroblast-runpod:latest
+# From the repo root, on the commit you want to ship
+SHA=$(git rev-parse --short HEAD)
+
+docker build --platform linux/amd64 -f Dockerfile.runpod \
+  --build-arg REPO_REF="$SHA" \
+  -t <your-dockerhub-user>/fibroblast-runpod:"$SHA" .
+
+docker push <your-dockerhub-user>/fibroblast-runpod:"$SHA"
 ```
 
 Notes:
-- The image pre-downloads the Cellpose `cyto3` weights so cold starts don't
-  re-download them.
-- Base image is `pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime` (matches
-  almost all RunPod GPU fleets).
+- `--platform linux/amd64` matters when building on an Apple Silicon Mac;
+  RunPod fleets are x86.
+- The Dockerfile does **not** copy your working tree. It clones `REPO_URL` at
+  `REPO_REF` from GitHub, so **commit and push before building** or the image
+  will not contain your change.
+- Base image is `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404`
+  (torch 2.8 / NumPy 2).
+- Cellpose `cyto3` weights are **not** baked into the image. They are read
+  from the Network Volume at `$CELLPOSE_LOCAL_MODELS_PATH`
+  (`/runpod-volume/cellpose_models`), which you pre-populate once — see
+  section 6. Without a volume, each cold start re-downloads them.
 
 ## 2. Create the Serverless endpoint
 
 1. Go to **RunPod Console -> Serverless -> New Endpoint**.
-2. **Container Image:** `docker.io/<your-dockerhub-user>/fibroblast-runpod:latest`
+2. **Container Image:** `docker.io/<your-dockerhub-user>/fibroblast-runpod:<SHA>`
 3. **Container Disk:** 5 GB is plenty.
 4. **GPU Types:** pick whatever fits your budget (RTX A4000 / A5000 is fine
    for Cellpose on typical microscopy tiles).
 5. **Max Workers:** start with 1-3 for testing.
+   **Min Workers: 0** — anything higher bills continuously while idle.
 6. **Idle Timeout:** 5-30 s (this controls how quickly workers scale down).
 7. **Container Start Command:** leave blank (the `CMD` in the Dockerfile
    already runs `python -u runpod_handler.py`).
@@ -100,7 +122,7 @@ export RUNPOD_ENDPOINT_ID="abc123xyz"
 # export RUNPOD_POLL_TIMEOUT=300
 # export RUNPOD_POLL_INTERVAL=2
 
-python Gradio-Batch.py
+python Gradio-RunPod.py
 ```
 
 The UI will be on `http://<ec2-ip>:7860`. Any image uploaded by a user
@@ -122,7 +144,7 @@ Environment=RUNPOD_API_KEY=rpa_xxx...
 Environment=RUNPOD_ENDPOINT_ID=abc123xyz
 Environment=GRADIO_SERVER_NAME=0.0.0.0
 Environment=GRADIO_SERVER_PORT=7860
-ExecStart=/opt/fibroblast/.venv/bin/python Gradio-Batch.py
+ExecStart=/opt/fibroblast/.venv/bin/python Gradio-RunPod.py
 Restart=always
 
 [Install]
@@ -227,11 +249,29 @@ Notes:
 When you change `runpod_handler.py`:
 
 ```bash
-docker build -f Dockerfile.runpod -t <user>/fibroblast-runpod:latest .
-docker push <user>/fibroblast-runpod:latest
-# In the RunPod console: endpoint -> "Release" -> bump the version,
-# or just wait for new workers to pull :latest.
+# 1. Commit and push first - the image is built from GitHub, not your disk.
+git push
+
+# 2. Build and push, tagged with the exact commit.
+SHA=$(git rev-parse --short HEAD)
+docker build --platform linux/amd64 -f Dockerfile.runpod \
+  --build-arg REPO_REF="$SHA" -t <user>/fibroblast-runpod:"$SHA" .
+docker push <user>/fibroblast-runpod:"$SHA"
 ```
 
-No change to the Gradio box is needed unless the input/output schema
-changes.
+3. In the RunPod console: endpoint -> **Edit** -> set the image to the new
+   `<SHA>` tag -> **Save** -> **Release**.
+4. Smoke-test with a single image before running a batch.
+
+No change to the Gradio box is needed unless the input/output schema changes.
+
+### Rolling back
+
+Every previous image is still in the registry under its own SHA tag, so a bad
+release is undone without rebuilding anything:
+
+```
+RunPod console -> endpoint -> Edit -> image: <user>/fibroblast-runpod:<PREVIOUS-SHA> -> Release
+```
+
+Note which SHA is live before each release so you know what to return to.
