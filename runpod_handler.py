@@ -6,6 +6,11 @@ Input JSON (job["input"]):
     image_b64 : str   (required) PNG/JPEG bytes, base64-encoded. A
                       "data:image/...;base64,..." prefix is accepted.
     diameter  : float (optional) approx. cell diameter (px). null => auto.
+    diameters : list  (optional) run a SWEEP over these diameters instead of a
+                      single one, e.g. [15, 25, 35, 45]. Max 12 values per job.
+                      When present, `diameter` is ignored and the response
+                      carries `sweep` / `sweep_plot_b64` instead of the single
+                      `cell_count` / `confluency` / `mask_b64` fields.
     denoise   : bool  (optional, default false)
     blur      : bool  (optional, default false)
     cell_line : str   (optional) GESTALT / Coriell cell line ID (e.g. "AG08498").
@@ -22,6 +27,15 @@ Output JSON:
     mask_b64        : str     PNG base64
     histogram_b64   : str     PNG base64
     persist_path    : str     (only if a Network Volume is attached)
+
+Sweep output JSON (when `diameters` was supplied):
+    sweep           : list of {diameter, cell_count, confluency, mask_b64}
+    sweep_plot_b64  : str     PNG base64 (count + confluency vs diameter)
+    normalized_b64  : str     PNG base64 (shared by every diameter)
+    histogram_b64   : str     PNG base64 (shared by every diameter)
+    min_intensity   : int
+    max_intensity   : int
+    cell_line       : str|null
 On failure:
     { "error": str, "trace": str }
 
@@ -34,7 +48,8 @@ outputs to:
     /runpod-volume/fibroblast/<job_id>/
         input.png
         normalized.png
-        mask.png
+        mask.png            (single-diameter jobs)
+        mask_d<diameter>.png + sweep_plot.png   (sweep jobs)
         histogram.png
         stats.json
 
@@ -82,6 +97,11 @@ import runpod
 # If no volume is attached, that path does not exist and persistence is
 # silently skipped. Override the mount path with PERSIST_ROOT for local
 # testing (e.g. PERSIST_ROOT=/tmp/fibroblast-persist).
+
+# A sweep runs one full segmentation per diameter, so cost scales linearly
+# with the number of points. Cap it so a slider mistake can't launch 200
+# GPU-seconds of work.
+MAX_SWEEP_POINTS = 12
 
 PERSIST_ROOT = os.environ.get("PERSIST_ROOT", "/runpod-volume")
 PERSIST_SUBDIR = os.environ.get("PERSIST_SUBDIR", "fibroblast")
@@ -149,14 +169,16 @@ def _normalize(img: np.ndarray) -> np.ndarray:
 def _persist_job_artifacts(
     job_id: str,
     input_pil: Image.Image,
-    norm_img: Image.Image,
-    mask_img: Image.Image,
-    hist_img: Image.Image,
+    images: dict,
     stats: dict,
     params: dict,
 ) -> str | None:
     """Write this job's artifacts to the network volume. Returns the
-    directory path on success, or None if persistence is disabled/failed."""
+    directory path on success, or None if persistence is disabled/failed.
+
+    `images` maps output filename -> PIL image, so single-diameter jobs and
+    sweeps (one mask per diameter, plus the sweep plot) share this code.
+    """
     if not PERSIST_ENABLED:
         return None
     try:
@@ -168,9 +190,8 @@ def _persist_job_artifacts(
             input_pil = input_pil.convert("RGB")
         input_pil.save(os.path.join(out_dir, "input.png"))
 
-        norm_img.save(os.path.join(out_dir, "normalized.png"))
-        mask_img.save(os.path.join(out_dir, "mask.png"))
-        hist_img.save(os.path.join(out_dir, "histogram.png"))
+        for filename, img in images.items():
+            img.save(os.path.join(out_dir, filename))
 
         meta = {
             "job_id": job_id,
@@ -187,27 +208,83 @@ def _persist_job_artifacts(
         return None
 
 
+def _render_norm(norm_gray: np.ndarray) -> Image.Image:
+    fig, ax = plt.subplots(figsize=(4, 4))
+    ax.imshow(norm_gray, cmap="gray")
+    ax.set_title("Normalized Image")
+    ax.axis("off")
+    return _fig_to_pil(fig)
+
+
+def _render_mask(masks: np.ndarray, title: str = "Segmentation Mask") -> Image.Image:
+    fig, ax = plt.subplots(figsize=(4, 4))
+    ax.imshow(masks, cmap="nipy_spectral")
+    ax.set_title(title)
+    ax.axis("off")
+    return _fig_to_pil(fig)
+
+
+def _render_hist(norm_gray: np.ndarray) -> Image.Image:
+    fig, ax = plt.subplots(figsize=(4, 3))
+    ax.hist(norm_gray.ravel(), bins=256, range=(0, 255), color="gray", edgecolor="black")
+    ax.set_title("Intensity Histogram")
+    ax.set_xlabel("Pixel Intensity")
+    ax.set_ylabel("Frequency")
+    return _fig_to_pil(fig)
+
+
 def _render_visuals(norm_gray: np.ndarray, masks: np.ndarray):
-    fig1, ax1 = plt.subplots(figsize=(4, 4))
-    ax1.imshow(norm_gray, cmap="gray")
-    ax1.set_title("Normalized Image")
-    ax1.axis("off")
-    norm_img = _fig_to_pil(fig1)
+    return _render_norm(norm_gray), _render_mask(masks), _render_hist(norm_gray)
 
-    fig2, ax2 = plt.subplots(figsize=(4, 4))
-    ax2.imshow(masks, cmap="nipy_spectral")
-    ax2.set_title("Segmentation Mask")
-    ax2.axis("off")
-    mask_img = _fig_to_pil(fig2)
 
-    fig3, ax3 = plt.subplots(figsize=(4, 3))
-    ax3.hist(norm_gray.ravel(), bins=256, range=(0, 255), color="gray", edgecolor="black")
-    ax3.set_title("Intensity Histogram")
-    ax3.set_xlabel("Pixel Intensity")
-    ax3.set_ylabel("Frequency")
-    hist_img = _fig_to_pil(fig3)
+def _render_sweep_plot(sweep: list) -> Image.Image:
+    """Cell count and confluency against diameter.
 
-    return norm_img, mask_img, hist_img
+    Two stacked panels sharing the x-axis rather than one chart with two
+    y-scales: the measures have different units and ranges, and a dual axis
+    lets the reader infer crossings that are an artefact of the scaling.
+    """
+    d = [r["diameter"] for r in sweep]
+    series = (
+        ([r["cell_count"] for r in sweep], "#2a78d6", "Cells detected", "cells"),
+        ([r["confluency"] for r in sweep], "#eb6834", "Confluency", "% of field"),
+    )
+
+    fig, axes = plt.subplots(2, 1, figsize=(6.5, 5.4), sharex=True)
+    for ax, (ys, color, title, ylab) in zip(axes, series):
+        ax.plot(d, ys, color=color, linewidth=2, marker="o", markersize=6,
+                markerfacecolor=color, markeredgecolor="white", markeredgewidth=1.2)
+        ax.set_title(title, loc="left", fontsize=11, color="#0b0b0b")
+        ax.set_ylabel(ylab, fontsize=9, color="#52514e")
+        ax.grid(True, axis="y", color="#e6e5e1", linewidth=0.8)
+        ax.set_axisbelow(True)
+        ax.margins(y=0.20)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#c9c8c3")
+        ax.spines["bottom"].set_color("#c9c8c3")
+        ax.tick_params(colors="#52514e", labelsize=9)
+
+    # One direct label, not a number on every point: the diameter that found
+    # the most cells is the value the reader is scanning for.
+    counts = [r["cell_count"] for r in sweep]
+    peak = int(np.argmax(counts))
+    # Keep the label inside the axes when the peak is at either end.
+    ha = "center"
+    if peak == 0:
+        ha = "left"
+    elif peak == len(d) - 1:
+        ha = "right"
+    axes[0].annotate(
+        f"{counts[peak]} cells @ d={d[peak]:g}",
+        xy=(d[peak], counts[peak]), xytext=(0, 10), textcoords="offset points",
+        ha=ha, fontsize=9, color="#0b0b0b",
+    )
+
+    axes[1].set_xlabel("Approx. cell diameter (px)", fontsize=10, color="#52514e")
+    axes[1].set_xticks(d)
+    fig.tight_layout()
+    return _fig_to_pil(fig)
 
 
 # ----------------- Handler -----------------
@@ -226,6 +303,23 @@ def handler(job):
                 diameter = float(diameter)
             except (TypeError, ValueError):
                 return {"error": f"Invalid 'diameter' value: {diameter!r}"}
+
+        diameters = job_input.get("diameters")
+        if diameters is not None:
+            if not isinstance(diameters, (list, tuple)) or not diameters:
+                return {"error": "'diameters' must be a non-empty list of numbers."}
+            if len(diameters) > MAX_SWEEP_POINTS:
+                return {
+                    "error": f"'diameters' accepts at most {MAX_SWEEP_POINTS} "
+                             f"values per job (got {len(diameters)}); each one "
+                             f"costs a full segmentation."
+                }
+            try:
+                diameters = [float(d) for d in diameters]
+            except (TypeError, ValueError):
+                return {"error": f"Invalid value in 'diameters': {diameters!r}"}
+            if any(d <= 0 for d in diameters):
+                return {"error": "Every value in 'diameters' must be greater than 0."}
 
         denoise = bool(job_input.get("denoise", False))
         blur = bool(job_input.get("blur", False))
@@ -250,43 +344,91 @@ def handler(job):
 
         norm_gray = _normalize(gray)
 
+        min_intensity = int(norm_gray.min())
+        max_intensity = int(norm_gray.max())
+
+        # The normalized view and the histogram depend only on the image, so
+        # they are rendered once and shared across every diameter in a sweep.
+        norm_img = _render_norm(norm_gray)
+        hist_img = _render_hist(norm_gray)
+
+        # RunPod sets job["id"]; fall back to a timestamp in local runs.
+        job_id = job.get("id") or datetime.now(timezone.utc).strftime(
+            "local-%Y%m%dT%H%M%S%f"
+        )
+        params = {
+            "diameter": diameter,
+            "diameters": diameters,
+            "denoise": denoise,
+            "blur": blur,
+            "cell_line": cell_line,
+        }
+        images = {"normalized.png": norm_img, "histogram.png": hist_img}
+
+        if diameters:
+            sweep = []
+            for d in diameters:
+                masks, _flows, _styles, _diams = MODEL.eval(
+                    norm_gray, diameter=d, channels=[0, 0]
+                )
+                labels = np.unique(masks)
+                entry = {
+                    "diameter": d,
+                    "cell_count": int((labels != 0).sum()),
+                    "confluency": float(100.0 * np.count_nonzero(masks) / masks.size),
+                }
+                mask_img = _render_mask(
+                    masks, f"d = {d:g} px  |  {entry['cell_count']} cells"
+                )
+                images[f"mask_d{d:g}.png"] = mask_img
+                entry["mask_b64"] = _pil_to_b64(mask_img)
+                sweep.append(entry)
+
+            plot_img = _render_sweep_plot(sweep)
+            images["sweep_plot.png"] = plot_img
+
+            stats = {
+                "sweep": [
+                    {k: v for k, v in e.items() if k != "mask_b64"} for e in sweep
+                ],
+                "min_intensity": min_intensity,
+                "max_intensity": max_intensity,
+            }
+            persist_path = _persist_job_artifacts(
+                job_id=job_id, input_pil=pil, images=images,
+                stats=stats, params=params,
+            )
+            response = {
+                "sweep": sweep,
+                "sweep_plot_b64": _pil_to_b64(plot_img),
+                "normalized_b64": _pil_to_b64(norm_img),
+                "histogram_b64": _pil_to_b64(hist_img),
+                "min_intensity": min_intensity,
+                "max_intensity": max_intensity,
+                "cell_line": cell_line,
+            }
+            if persist_path:
+                response["persist_path"] = persist_path
+            return response
+
         masks, _flows, _styles, _diams = MODEL.eval(
             norm_gray, diameter=diameter, channels=[0, 0]
         )
 
         labels = np.unique(masks)
-        cell_count = int((labels != 0).sum())
-        confluency = float(100.0 * np.count_nonzero(masks) / masks.size)
-        min_intensity = int(norm_gray.min())
-        max_intensity = int(norm_gray.max())
-
-        norm_img, mask_img, hist_img = _render_visuals(norm_gray, masks)
+        mask_img = _render_mask(masks)
+        images["mask.png"] = mask_img
 
         stats = {
-            "cell_count": cell_count,
-            "confluency": confluency,
+            "cell_count": int((labels != 0).sum()),
+            "confluency": float(100.0 * np.count_nonzero(masks) / masks.size),
             "min_intensity": min_intensity,
             "max_intensity": max_intensity,
         }
 
-        # Optional per-job persistence on /runpod-volume.
-        # RunPod sets job["id"]; fall back to a timestamp in local runs.
-        job_id = job.get("id") or datetime.now(timezone.utc).strftime(
-            "local-%Y%m%dT%H%M%S%f"
-        )
         persist_path = _persist_job_artifacts(
-            job_id=job_id,
-            input_pil=pil,
-            norm_img=norm_img,
-            mask_img=mask_img,
-            hist_img=hist_img,
-            stats=stats,
-            params={
-                "diameter": diameter,
-                "denoise": denoise,
-                "blur": blur,
-                "cell_line": cell_line,
-            },
+            job_id=job_id, input_pil=pil, images=images,
+            stats=stats, params=params,
         )
 
         response = {

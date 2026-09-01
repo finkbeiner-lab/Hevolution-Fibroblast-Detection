@@ -55,6 +55,28 @@ The first click is slow (~30–60 s): cellpose downloads the `cyto3` weights
 (~25 MB) and loads the model. Every click after that reuses the loaded model,
 exactly like a warm RunPod worker.
 
+### Diameter sweep
+
+Cellpose is sensitive to the diameter you give it, and the right value is not
+obvious from looking at a plate. Switch **Diameter mode** to **Diameter sweep**
+to segment the same image once per diameter and compare:
+
+- set the smallest and largest diameter, and how many to try (2–12);
+- a line under the sliders previews exactly which diameters will run;
+- results come back as a mask gallery (one per diameter), a table of
+  cell count and confluency, and a two-panel chart of both against diameter.
+
+Every mask is written to `local-runs/fibroblast/<job_id>/mask_d<diameter>.png`
+and the numbers land in `stats.json`, so you can compare runs later.
+
+The highest cell count is **not** automatically the right answer — an
+over-small diameter fragments one cell into several, which inflates the count.
+Use the gallery to check the masks against the cells you can actually see.
+
+Each diameter is a full segmentation, so a 5-point sweep costs roughly 5x a
+single run. That's free locally; on RunPod it is 5x the GPU seconds, which is
+exactly why it's worth settling the diameter here first.
+
 ### What it writes
 
 `run_local.sh` points `PERSIST_ROOT` at `./local-runs/`, which exercises the
