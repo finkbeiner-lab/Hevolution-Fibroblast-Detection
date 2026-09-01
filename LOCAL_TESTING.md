@@ -61,7 +61,7 @@ Cellpose is sensitive to the diameter you give it, and the right value is not
 obvious from looking at a plate. Switch **Diameter mode** to **Diameter sweep**
 to segment the same image once per diameter and compare:
 
-- set the smallest and largest diameter, and how many to try (2–12);
+- set the smallest and largest diameter (up to 200 px), and how many to try (2–12);
 - a line under the sliders previews exactly which diameters will run;
 - results come back as a mask gallery (one per diameter), a table of
   cell count and confluency, and a two-panel chart of both against diameter.
@@ -76,6 +76,19 @@ Use the gallery to check the masks against the cells you can actually see.
 Each diameter is a full segmentation, so a 5-point sweep costs roughly 5x a
 single run. That's free locally; on RunPod it is 5x the GPU seconds, which is
 exactly why it's worth settling the diameter here first.
+
+### Image formats and bit depth
+
+Any format PIL can read is accepted — JPEG, PNG, **TIFF (8/16/32-bit, including
+multi-page)**, BMP, WebP. The file is sent to the worker **exactly as uploaded**,
+so bit depth survives; only images too large for the request limit are decoded
+and downscaled (and the log says so, because pixel diameters scale with it).
+
+Multi-page TIFFs — z-stacks, time series — use the first frame.
+
+> Gradio's image widget converts uploads to 8-bit RGB by default, which turns a
+> 16-bit TIFF into solid white and segments to nothing, with no error. The
+> component is therefore configured with `image_mode=None`; don't remove it.
 
 ### How confluency is measured
 

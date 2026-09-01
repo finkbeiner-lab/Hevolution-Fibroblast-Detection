@@ -3,7 +3,9 @@
 Contract
 --------
 Input JSON (job["input"]):
-    image_b64 : str   (required) PNG/JPEG bytes, base64-encoded. A
+    image_b64 : str   (required) image bytes, base64-encoded. Any format PIL
+                      can read - JPEG, PNG, TIFF (8/16/32-bit, multi-page),
+                      BMP, WebP - at any bit depth. A
                       "data:image/...;base64,..." prefix is accepted.
     diameter  : float (optional) approx. cell diameter (px). null => auto.
     diameters : list  (optional) run a SWEEP over these diameters instead of a
@@ -165,7 +167,37 @@ def _b64_to_pil(b64: str) -> Image.Image:
     if b64.startswith("data:"):
         b64 = b64.split(",", 1)[1]
     raw = base64.b64decode(b64)
-    return Image.open(io.BytesIO(raw))
+    img = Image.open(io.BytesIO(raw))
+    # Multi-page TIFF (z-stack / time series): segment the first frame.
+    if getattr(img, "n_frames", 1) > 1:
+        print(f"[input] Multi-frame image ({img.n_frames} frames); using the first.")
+        img.seek(0)
+    return img
+
+
+def _to_gray(img: Image.Image) -> np.ndarray:
+    """Single-channel array from any PIL image, at its original bit depth.
+
+    Bit depth is preserved here on purpose: _normalize() percentile-stretches
+    to 8-bit later, and doing that from the true 16-bit values keeps far more
+    contrast than letting PIL truncate to 8-bit first.
+    """
+    # Palette images decode to palette indices, which are not intensities.
+    if img.mode in ("P", "PA"):
+        img = img.convert("RGBA" if img.mode == "PA" else "RGB")
+
+    arr = np.array(img)
+    if arr.ndim == 2:
+        return arr
+    if arr.ndim == 3:
+        if arr.shape[2] >= 3:
+            rgb = arr[:, :, :3]
+            # cvtColor needs uint8/uint16/float32; normalise the dtype first.
+            if rgb.dtype not in (np.uint8, np.uint16, np.float32):
+                rgb = rgb.astype(np.float32)
+            return cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        return arr[:, :, 0]  # LA, or any single-channel-plus-alpha layout
+    raise ValueError(f"Unsupported image with shape {arr.shape}")
 
 
 def _pil_to_b64(img: Image.Image, fmt: str = "PNG") -> str:
@@ -449,21 +481,19 @@ def handler(job):
             cell_line = str(cell_line).strip() or None
 
         pil = _b64_to_pil(image_b64)
-        img = np.array(pil)
+        gray = _to_gray(pil)
 
-        if img.ndim == 3 and img.shape[2] == 4:
-            img = img[:, :, :3]
-        if img.ndim == 3 and img.shape[2] == 3:
-            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = img.copy()
+        # Normalise BEFORE denoise/blur. _denoise() clips to 0-255 for
+        # cv2.fastNlMeansDenoising, so running it on 16-bit data first would
+        # flatten everything above 255 to white and destroy the image.
+        # Percentile-stretching to 8-bit up front makes the optional filters
+        # safe at any input bit depth.
+        norm_gray = _normalize(gray)
 
         if denoise:
-            gray = _denoise(gray)
+            norm_gray = _denoise(norm_gray)
         if blur:
-            gray = cv2.GaussianBlur(gray, (5, 5), sigmaX=1.0)
-
-        norm_gray = _normalize(gray)
+            norm_gray = cv2.GaussianBlur(norm_gray, (5, 5), sigmaX=1.0)
 
         min_intensity = int(norm_gray.min())
         max_intensity = int(norm_gray.max())

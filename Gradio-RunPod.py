@@ -27,8 +27,10 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import gradio as gr
+import numpy as np
 import requests
 from PIL import Image
 
@@ -74,30 +76,75 @@ SWEEP_MODE = "Diameter sweep"
 # headroom for the JSON wrapper and HTTP framing. Leave ~500 KiB of slack.
 _MAX_RAW_IMAGE_BYTES = int((10 * 1024 * 1024 - 500_000) * 3 / 4)
 
+# Modes PNG can store directly. Anything else has to be coerced first, but
+# only on the oversized path - normally the original bytes are sent untouched.
+_PNG_DIRECT_MODES = {
+    "1", "L", "LA", "P", "PA", "RGB", "RGBA", "I;16", "I;16B", "I;16L",
+}
 
-def _image_to_b64(image: Image.Image) -> str:
-    """Encode for transport to RunPod. Try PNG first (lossless); fall back to
-    high-quality JPEG and then to a resized JPEG if the image is too large
-    for RunPod's 10 MiB body limit.
+
+def _open_any(path: str) -> Image.Image:
+    """Open any format PIL can read.
+
+    Multi-page TIFFs (z-stacks, time series) are common in microscopy; take
+    the first frame rather than failing.
     """
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    if buf.tell() <= _MAX_RAW_IMAGE_BYTES:
-        return base64.b64encode(buf.getvalue()).decode("ascii")
+    img = Image.open(path)
+    if getattr(img, "n_frames", 1) > 1:
+        logger.info("Multi-frame image (%d frames); using the first.", img.n_frames)
+        img.seek(0)
+    return img
 
-    # Too big as PNG. Re-encode as JPEG at near-lossless quality.
-    if image.mode not in ("RGB", "L"):
-        image = image.convert("RGB")
-    buf = io.BytesIO()
-    image.save(buf, format="JPEG", quality=95, optimize=True)
-    if buf.tell() > _MAX_RAW_IMAGE_BYTES:
-        # Still too big — downscale. Shrink pixel count proportionally to fit.
-        scale = (_MAX_RAW_IMAGE_BYTES / buf.tell()) ** 0.5 * 0.95
-        new_size = (max(1, int(image.size[0] * scale)), max(1, int(image.size[1] * scale)))
-        image = image.resize(new_size, Image.LANCZOS)
+
+def _to_png_safe(img: Image.Image) -> Image.Image:
+    """Coerce a PIL image into a mode PNG can actually store."""
+    if img.mode in _PNG_DIRECT_MODES:
+        return img
+    if img.mode in ("I", "F") or img.mode.startswith("I;32"):
+        # 32-bit int / float TIFF. PNG tops out at 16 bits per channel, which
+        # is already more range than the segmentation uses, so rescale rather
+        # than convert("L") - that truncates and can black out the image.
+        arr = np.asarray(img).astype("float64")
+        lo, hi = float(arr.min()), float(arr.max())
+        arr = (arr - lo) / (hi - lo) if hi > lo else np.zeros_like(arr)
+        return Image.fromarray((arr * 65535).astype("uint16"))
+    return img.convert("RGB")
+
+
+def _encode_for_transport(path: str) -> str:
+    """Base64-encode the uploaded file for the worker.
+
+    Sends the ORIGINAL bytes whenever they fit. That preserves bit depth and
+    format exactly - a 16-bit TIFF stays 16-bit - and avoids inflating a small
+    JPEG into a multi-megabyte PNG. Only oversized images are decoded, and
+    only then are they downscaled.
+    """
+    raw = Path(path).read_bytes()
+    if len(raw) <= _MAX_RAW_IMAGE_BYTES:
+        return base64.b64encode(raw).decode("ascii")
+
+    img = _to_png_safe(_open_any(path))
+    for scale in (1.0, 0.75, 0.5, 0.35, 0.25, 0.15):
+        w, h = img.size
+        candidate = (
+            img if scale == 1.0
+            else img.resize((max(1, int(w * scale)), max(1, int(h * scale))),
+                            Image.LANCZOS)
+        )
         buf = io.BytesIO()
-        image.save(buf, format="JPEG", quality=92, optimize=True)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+        candidate.save(buf, format="PNG")
+        if buf.tell() <= _MAX_RAW_IMAGE_BYTES:
+            if scale != 1.0:
+                logger.warning(
+                    "Image downscaled to %.0f%% to fit the request limit; "
+                    "pixel diameters scale with it.", scale * 100,
+                )
+            return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    raise ValueError(
+        f"Image is too large to send even at 15% scale ({len(raw) / 1e6:.1f} MB). "
+        "Crop or downsample it first."
+    )
 
 
 def _b64_to_image(b64: str) -> Image.Image:
@@ -256,7 +303,7 @@ def invoke_runpod(image, mode, diameter, d_min, d_max, d_steps,
 
     try:
         job_input = {
-            "image_b64": _image_to_b64(image),
+            "image_b64": _encode_for_transport(image),
             "confluency_sensitivity": float(sensitivity),
             "denoise": bool(denoise),
             "blur": bool(blur),
@@ -334,7 +381,15 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
 
     with gr.Row():
         with gr.Column():
-            image_input = gr.Image(type="pil", label="Upload Image")
+            # type="filepath" + image_mode=None hands us the file exactly as
+            # uploaded. Gradio's default (image_mode="RGB") converts first,
+            # which destroys 16-bit TIFFs - a 16-bit image converts to solid
+            # white, silently, and segments to nothing.
+            image_input = gr.Image(
+                type="filepath",
+                image_mode=None,
+                label="Upload Image (JPEG, PNG, TIFF, BMP, WebP, ...)",
+            )
             cell_line_dropdown = gr.Dropdown(
                 choices=GESTALT_CELL_LINES,
                 value="(Not specified)",
@@ -349,18 +404,18 @@ with gr.Blocks(title="Fibroblast Detection") as demo:
             )
             with gr.Group() as single_controls:
                 diameter_slider = gr.Slider(
-                    minimum=5, maximum=100, step=1, value=30,
-                    label="Approx. Cell Diameter",
+                    minimum=5, maximum=200, step=1, value=30,
+                    label="Approx. Cell Diameter (px)",
                 )
             with gr.Group(visible=False) as sweep_controls:
                 with gr.Row():
                     d_min_slider = gr.Slider(
-                        minimum=5, maximum=100, step=1, value=15,
-                        label="Smallest diameter",
+                        minimum=5, maximum=200, step=1, value=40,
+                        label="Smallest diameter (px)",
                     )
                     d_max_slider = gr.Slider(
-                        minimum=5, maximum=100, step=1, value=45,
-                        label="Largest diameter",
+                        minimum=5, maximum=200, step=1, value=120,
+                        label="Largest diameter (px)",
                     )
                 d_steps_slider = gr.Slider(
                     minimum=2, maximum=MAX_SWEEP_POINTS, step=1, value=5,
