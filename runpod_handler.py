@@ -697,13 +697,8 @@ def _render_visuals(norm_gray: np.ndarray, masks: np.ndarray):
     return _render_norm(norm_gray), _render_mask(masks), _render_hist(norm_gray)
 
 
-def _render_sweep_plot(sweep: list, confluency: float | None = None) -> Image.Image:
+def _render_sweep_plot(sweep: list) -> Image.Image:
     """Cell count and mask coverage against diameter.
-
-    Confluency is a property of the IMAGE, not of the diameter, so it is drawn
-    once as a reference line rather than swept. The gap between the coverage
-    curve and that line is the cell area Cellpose failed to capture at each
-    diameter - which is the thing worth reading here.
 
     Two stacked panels sharing the x-axis rather than one chart with two
     y-scales: the measures have different units and ranges, and a dual axis
@@ -746,16 +741,6 @@ def _render_sweep_plot(sweep: list, confluency: float | None = None) -> Image.Im
         xy=(d[peak], counts[peak]), xytext=(0, 10), textcoords="offset points",
         ha=ha, fontsize=9, color="#0b0b0b",
     )
-
-    if confluency is not None:
-        axes[1].axhline(confluency, color="#52514e", linewidth=1.2,
-                        linestyle="--", zorder=1)
-        axes[1].annotate(
-            f"measured cell coverage {confluency:.1f}%",
-            xy=(d[0], confluency), xytext=(0, 5), textcoords="offset points",
-            ha="left", fontsize=8.5, color="#52514e",
-        )
-        axes[1].set_ylim(top=max(max(series[1][0]), confluency) * 1.25)
 
     axes[1].set_xlabel("Approx. cell diameter (px)", fontsize=10, color="#52514e")
     axes[1].set_xticks(d)
@@ -908,7 +893,7 @@ def handler(job):
                 entry["mask_b64"] = _pil_to_b64(mask_img)
                 sweep.append(entry)
 
-            plot_img = _render_sweep_plot(sweep, confluency=confluency)
+            plot_img = _render_sweep_plot(sweep)
             images["sweep_plot.png"] = plot_img
 
             best = max(sweep, key=lambda e: e["mask_coverage"])
@@ -957,7 +942,7 @@ def handler(job):
             # Re-segment at the winner rather than caching a label image per
             # candidate; one extra pass costs far less than holding ten
             # full-size label arrays.
-            plot_img = _render_sweep_plot(auto_trace, confluency=confluency)
+            plot_img = _render_sweep_plot(auto_trace)
             images["auto_diameter_plot.png"] = plot_img
 
         masks = _segment(norm_gray, diameter)

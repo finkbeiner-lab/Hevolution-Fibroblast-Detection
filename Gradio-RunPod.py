@@ -394,17 +394,19 @@ def _sweep_diameters(dmin, dmax, steps):
     return sorted({round(dmin + i * gap) for i in range(steps)})
 
 
-_SEVERITY_MARK = {"error": "🛑", "warn": "⚠️", "info": "ℹ️"}
-
-
 def _flags_md(output) -> str:
-    """Render the worker's quality flags, or fall back for an older worker."""
+    """Render the worker's quality flags, or fall back for an older worker.
+
+    Plain blockquote text, no icons: the messages already say what is wrong,
+    and a row of warning symbols above every result reads as alarming rather
+    than informative.
+    """
     flags = output.get("quality_flags")
     if flags is None:
         warning = output.get("confluency_warning")
-        return f"> ⚠️ {warning}\n\n" if warning else ""
-    lines = [f"> {_SEVERITY_MARK.get(f['severity'], '⚠️')} {f['message']}"
-             for f in flags if f["severity"] in ("warn", "error")]
+        return f"> {warning}\n\n" if warning else ""
+    lines = [f"> {f['message']}" for f in flags
+             if f["severity"] in ("warn", "error")]
     return ("\n>\n".join(lines) + "\n\n") if lines else ""
 
 
