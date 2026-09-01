@@ -1,5 +1,14 @@
 # EC2 Gradio Setup Guide
 
+> **Superseded.** This describes the original SageMaker backend, which was
+> abandoned (see `archive/README.md`). The live frontend is `Gradio-RunPod.py`
+> talking to a RunPod Serverless endpoint. To deploy a change to the running
+> app, use **`UPDATE_GRADIO_EC2.md`**. This file is kept only for the EC2 host
+> setup it describes — the venv layout, the systemd unit, the security group —
+> which is still how the box is built; substitute `Gradio-RunPod.py` for
+> `Gradio-SageMaker.py` and the `RUNPOD_*` variables for the `SAGEMAKER_*`
+> ones throughout.
+
 Quick guide to deploy and use `Gradio-SageMaker.py` on EC2 with your deployed SageMaker endpoint.
 
 ## ✅ Prerequisites

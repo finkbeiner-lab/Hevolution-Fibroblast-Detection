@@ -74,7 +74,7 @@ else
     echo "Common issues:"
     echo "  - Check AWS credentials: aws configure list"
     echo "  - Check environment variables in service file"
-    echo "  - Verify Gradio-SageMaker.py exists at: /home/ubuntu/fibroblast-app/Gradio-SageMaker.py"
+    echo "  - Verify Gradio-RunPod.py exists at: /home/ubuntu/fibroblast-app/Gradio-RunPod.py"
     echo "  - Check if virtual environment has required packages"
 fi
 echo ""
