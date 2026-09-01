@@ -38,11 +38,17 @@ python -c "from cellpose import models; print(models.Cellpose)"
 ## 2. Run it
 
 ```bash
-conda activate fibroblast-local
 ./run_local.sh
 ```
 
-Open <http://127.0.0.1:7860>. The left panel shows **Backend: `local
+The script activates the `fibroblast-local` env itself, so you don't have to
+remember to do it first. Open <http://127.0.0.1:7860>.
+
+> Running `conda activate fibroblast-local` and `./run_local.sh` as a single
+> pasted line produces
+> `EnvironmentLocationNotFound: Not a conda environment: .../fibroblast-local./run_local.sh`
+> — conda sees the `/` and reads the whole string as a path. Keep them on
+> separate lines, join them with `&&`, or just run `./run_local.sh` on its own. The left panel shows **Backend: `local
 (in-process cellpose)`** so you can tell at a glance which mode you're in.
 
 The first click is slow (~30–60 s): cellpose downloads the `cyto3` weights

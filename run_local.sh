@@ -8,6 +8,52 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# --- Make sure we're in the right conda env -----------------------------
+# Activating it here means `./run_local.sh` works on its own; you don't have
+# to remember to activate first. Override the name with FIBRO_ENV=... .
+ENV_NAME="${FIBRO_ENV:-fibroblast-local}"
+
+if [[ "${CONDA_DEFAULT_ENV:-}" != "$ENV_NAME" ]]; then
+    if ! command -v conda >/dev/null 2>&1; then
+        echo "ERROR: conda not found on PATH, and the '$ENV_NAME' env is not active." >&2
+        exit 1
+    fi
+    # shellcheck disable=SC1091
+    set +u; source "$(conda info --base)/etc/profile.d/conda.sh"; set -u
+    if conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
+        echo "Activating conda env: $ENV_NAME"
+        set +u; conda activate "$ENV_NAME"; set -u
+    else
+        cat >&2 <<MSG
+ERROR: conda env '$ENV_NAME' does not exist. Create it once with:
+
+    conda create -n $ENV_NAME python=3.11 -y
+    conda activate $ENV_NAME
+    pip install -r requirements-local.txt
+
+See LOCAL_TESTING.md.
+MSG
+        exit 1
+    fi
+fi
+
+# The worker uses the cellpose 3.x API. Fail loudly and early rather than
+# halfway through a click in the browser.
+python - <<'PYCHK' || exit 1
+import sys
+try:
+    from cellpose import models
+except ImportError:
+    sys.exit("ERROR: cellpose is not installed. pip install -r requirements-local.txt")
+if not hasattr(models, "Cellpose"):
+    from importlib.metadata import version
+    sys.exit(
+        f"ERROR: cellpose {version('cellpose')} is active, but the worker needs the\n"
+        "3.x API (models.Cellpose). Cellpose 4 renamed it and ships a different\n"
+        "model. Fix with:  pip install 'cellpose>=3,<4'"
+    )
+PYCHK
+
 # Run the worker in-process instead of calling the RunPod REST API.
 export LOCAL_INFERENCE=1
 
