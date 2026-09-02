@@ -5,15 +5,22 @@
 **Pushing to GitHub does not cost money and does not deploy anything.**
 
 Production does not watch your branch. `Dockerfile.runpod` clones the repo at
-*image build* time:
+*image build* time and checks out `REPO_REF`:
 
 ```dockerfile
 ARG REPO_REF=main
-RUN git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" /app/repo
+RUN git clone --quiet "$REPO_URL" /app/repo \
+    && git -C /app/repo checkout --detach "$REPO_REF" ...
 ```
 
 So code reaches the GPU only when **you** rebuild the image and repoint the
 RunPod endpoint. Those are manual steps you take on purpose.
+
+`REPO_REF` takes **a branch, a tag, or a commit SHA** — anything git can check
+out. It does *not* have to be `main`. Building from `ruth/my-branch` is a
+normal thing to do, and is how you put a change in front of the lab before
+merging it. The one requirement is that the ref has been **pushed to GitHub**,
+because the build clones from there and cannot see your working tree.
 
 | Action | Cost |
 |---|---|
@@ -104,6 +111,11 @@ echo "$SHA"
 
 Tag by SHA, **not** `latest`. A mutable `latest` tag leaves you nothing to roll
 back to; a SHA tag makes rollback a one-click repoint with no rebuild.
+
+(Before 2026-09, `Dockerfile.runpod` used `git clone --branch "$REPO_REF"`,
+which accepts only branch and tag *names* — passing a commit SHA failed the
+build with `fatal: Remote branch <sha> not found in upstream origin`. It now
+clones and checks out separately, so a SHA works.)
 
 ```bash
 docker build --platform linux/amd64 -f Dockerfile.runpod \

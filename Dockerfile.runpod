@@ -36,8 +36,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Shallow-clone the repo at the requested ref, then strip .git metadata.
-RUN git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" /app/repo \
+# Clone, then check out whatever ref was asked for, then strip .git metadata.
+#
+# NOT `git clone --depth 1 --branch "$REPO_REF"`: that accepts only branch and
+# tag NAMES. Passing a commit SHA fails the build outright with
+#   fatal: Remote branch <sha> not found in upstream origin
+# and a commit SHA is exactly what you want to pin a production image to.
+# A full clone of this repo is under 1 MB, so there is nothing to save by
+# being shallow. REPO_REF now takes a branch, a tag, or a commit SHA - the
+# second checkout covers a bare branch name that needs the origin/ prefix.
+RUN git clone --quiet "$REPO_URL" /app/repo \
+    && ( git -C /app/repo checkout --detach "$REPO_REF" \
+         || git -C /app/repo checkout --detach "origin/$REPO_REF" ) \
+    && git -C /app/repo log --oneline -1 \
     && rm -rf /app/repo/.git \
     && ls /app/repo/runpod_handler.py /app/repo/requirements-runpod.txt
 

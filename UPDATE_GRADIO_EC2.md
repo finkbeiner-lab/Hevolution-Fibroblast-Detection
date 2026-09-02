@@ -25,10 +25,26 @@ worker what it is at startup:
 Full context and the rollback story are in `WORKFLOW.md`; this is the short
 form.
 
-### 1. Merge to `main` and capture the commit
+### 1. Push, and pick the ref to build
+
+`REPO_REF` takes a branch, a tag, or a commit SHA. It does **not** have to be
+`main` — the only requirement is that the ref is **pushed to GitHub**, because
+the image build clones from there and cannot see your working tree.
+
+To put a branch in front of the lab before merging:
 
 ```bash
 git push -u origin <your-branch>
+SHA=$(git rev-parse --short HEAD) && echo "$SHA"     # build this, not the branch name
+```
+
+A branch name moves under you — the tag you deployed would quietly mean
+something else after your next push. Build the SHA (or a tag), so the image and
+the code stay pinned to each other.
+
+To merge first, which is what you want once the change is settled:
+
+```bash
 gh pr create --base main --head <your-branch> --title "..." --body "..."
 gh pr merge --squash
 git switch main && git pull
